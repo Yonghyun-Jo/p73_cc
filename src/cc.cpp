@@ -25,7 +25,12 @@ CustomController::CustomController(DataContainer &dc, RobotEigenData &rd)
         memory_info(Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault)),
         session(nullptr)
 {
-    weight_dir_ = std::string(getenv("HOME")) + "/Walker_ws/src/p73_cc/policy/policy.onnx";
+    if(is_on_robot_){
+        weight_dir_ = "/home/bluerobin/ros2_ws/src/p73_cc/policy/policy.onnx";
+    }
+    else{
+        weight_dir_ = std::string(getenv("HOME")) + "/Walker_ws/src/p73_cc/policy/policy.onnx";
+    }
 
     if (is_write_file_) {
         writeFile.open("/tmp/p73_cc_data.csv", ofstream::out);
@@ -229,7 +234,8 @@ void CustomController::processObservation()
 
     // MuJoCo gyro sensor outputs body-frame angular velocity directly.
     // NO rotation needed (unlike TOCABI which uses d->qvel world-frame).
-    Vector3d ang_vel_b = rd_.q_dot_virtual_.segment<3>(3);
+    Vector3d ang_vel_b = rd_.q_dot_virtual_.segment(3, 3);
+    // Vector3d ang_vel_b = quatRotateInverse(q, rd_.q_dot_virtual_.segment(3, 3));
 
     Vector3d g_w(0.0, 0.0, -1.0);
     Vector3d projected_gravity_b = quatRotateInverse(q, g_w);
@@ -246,6 +252,9 @@ void CustomController::processObservation()
         local_vel_y = target_vel_y_;
         local_vel_yaw = target_vel_yaw_;
     }
+
+    local_vel_x = 0.1;
+
     // Velocity command from ROS2 teleop (topic: p73/cmd_vel)
     // Usage: ros2 run teleop_twist_keyboard teleop_twist_keyboard --ros-args -r cmd_vel:=p73/cmd_vel
 
@@ -496,27 +505,31 @@ void CustomController::computeFast()
     }
 
     // // Spline transition for first 100ms
-    // if (control_time_us < start_time_ + 0.1e6) {
-    //     for (int i = 0; i < MODEL_DOF; i++)
-    //         torque_spline_(i) = DyrosMath::cubic(control_time_us,
-    //             start_time_, start_time_ + 0.1e6,
-    //             torque_init_(i), torque_rl_(i), 0.0, 0.0);
-    //     rd_.torque_desired = torque_spline_;
-    // } else {
-    //     rd_.torque_desired = torque_rl_;
-    // }
-    rd_.torque_desired = torque_rl_;
-
-    // 4-bar linkage: joint torque → motor torque (real robot only)
-    if (is_on_robot_) {
-        rd_.torque_desired = WBC::JointTorqueToMotorTorque(rd_, rd_.torque_desired);
+    if (control_time_us < start_time_ + 0.1e6) {
+        for (int i = 0; i < MODEL_DOF; i++)
+            torque_spline_(i) = DyrosMath::cubic(control_time_us,
+                start_time_, start_time_ + 0.1e6,
+                torque_init_(i), torque_rl_(i), 0.0, 0.0);
+        rd_.torque_desired = torque_spline_;
+        if (is_on_robot_) {
+            rd_.torque_desired = WBC::JointTorqueToMotorTorque(rd_, torque_spline_);
+        }
+    } else {
+        rd_.torque_desired = torque_rl_;
+        if (is_on_robot_) {
+            rd_.torque_desired = WBC::JointTorqueToMotorTorque(rd_, torque_rl_);
+        }
     }
 
     // ====== Data logging (every tick, ~1kHz) ======
     static std::ofstream log_file;
     static bool log_opened = false;
     if (!log_opened) {
+        
         std::string log_dir = std::string(getenv("HOME")) + "/Walker_ws/src/p73_cc/logs";
+        if(is_on_robot_){
+            log_dir = "/home/bluerobin/ros2_ws/src/p73_cc/logs";
+        }
         auto now = std::chrono::system_clock::now();
         auto t = std::chrono::system_clock::to_time_t(now);
         std::tm tm_buf;
@@ -670,9 +683,13 @@ void CustomController::velCmdCallback(const geometry_msgs::msg::Twist::SharedPtr
 void CustomController::startVelSubscriber()
 {
     vel_node_ = rclcpp::Node::make_shared("p73_vel_cmd_listener");
+    // vel_sub_ = vel_node_->create_subscription<geometry_msgs::msg::Twist>(
+    //     "p73/cmd_vel", 10,
+    //     std::bind(&CustomController::velCmdCallback, this, std::placeholders::_1));
     vel_sub_ = vel_node_->create_subscription<geometry_msgs::msg::Twist>(
-        "p73/cmd_vel", 10,
+        "/p73/cmd_vel", 10,
         std::bind(&CustomController::velCmdCallback, this, std::placeholders::_1));
+
     vel_spin_running_ = true;
     vel_spin_thread_ = std::thread([this]() {
         while (vel_spin_running_ && rclcpp::ok()) {
