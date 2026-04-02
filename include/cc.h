@@ -95,7 +95,7 @@ public:
 
     //////////////////////// processNoise (TOCABI sim2real pattern) ////////////////////////
     // is_on_robot_: true=real robot (direct sensor + LPF), false=sim (noise + numerical diff + LPF)
-    bool is_on_robot_ = false;
+    bool is_on_robot_ = true;
 
     // Filtered/noised joint state — used by BOTH obs and PD (matching TOCABI)
     Matrix<double, MODEL_DOF, 1> q_noise_;       // joint position (noised in sim, direct on robot)
@@ -107,7 +107,7 @@ public:
     double noise_time_pre_ = 0.0;
     bool noise_initialized_ = false;
 
-    static constexpr double lpf_cutoff_hz_ = 4.0;  // TOCABI uses 4Hz LPF for q_dot
+    static constexpr double lpf_cutoff_hz_ = 20.0;  // TOCABI uses 4Hz LPF for q_dot
 
     //////////////////////// Robot State ////////////////////////
     // Default joint positions in P73 order (from p73_walker.py)
@@ -127,8 +127,10 @@ public:
     VectorQd kp_p73_, kd_p73_;
     VectorQd torque_bound_p73_;
     VectorQd torque_rl_;
+    VectorQd q_init_;
     VectorQd torque_init_;
     VectorQd q_init_hold_;  // DEBUG: captured pose at mode entry
+    VectorQd q_spline_;
     VectorQd torque_spline_;
 
     double action_scale_ = 0.5;  // from ActionsCfg scale

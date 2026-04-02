@@ -197,7 +197,8 @@ void CustomController::processNoise()
             double sampling_freq = 1.0 / dt;
             q_dot_lpf_ = DyrosMath::lpf<MODEL_DOF>(rd_.q_dot_, q_dot_lpf_, sampling_freq, lpf_cutoff_hz_);
         }
-        q_vel_noise_ = q_dot_lpf_;
+        // q_vel_noise_ = q_dot_lpf_;
+        q_vel_noise_ = rd_.q_dot_;
     }
     else
     {
@@ -253,7 +254,7 @@ void CustomController::processObservation()
         local_vel_yaw = target_vel_yaw_;
     }
 
-    //local_vel_x = 0.1;
+    local_vel_x = 0.1;
 
     // Velocity command from ROS2 teleop (topic: p73/cmd_vel)
     // Usage: ros2 run teleop_twist_keyboard teleop_twist_keyboard --ros-args -r cmd_vel:=p73/cmd_vel
@@ -373,6 +374,7 @@ void CustomController::computeFast()
     if (init) {
         init = false;
         start_time_ = control_time_us;
+        q_init_ = rd_.q_;
         torque_init_ = rd_.torque_desired;
         time_inference_pre_ = control_time_us - policy_dt_ * 1e6;
         rl_action_.setZero();
@@ -497,29 +499,41 @@ void CustomController::computeFast()
         target_pos(i) = q_default_p73_(i) + dq;
         target_pos(i) = DyrosMath::minmax_cut(target_pos(i), q_limit_lower_p73_(i), q_limit_upper_p73_(i));
     }
-    for (int i = 0; i < MODEL_DOF; i++) {
-        torque_rl_(i) = kp_p73_(i) * (target_pos(i) - q_noise_(i))
-                      - kd_p73_(i) * q_vel_noise_(i);
-        torque_rl_(i) = DyrosMath::minmax_cut(torque_rl_(i),
-                        -torque_bound_p73_(i), torque_bound_p73_(i));
+
+    if (control_time_us < start_time_ + 0.1e6) {
+        for (int i = 0; i < MODEL_DOF; i++){
+            rd_.q_desired(i) = DyrosMath::cubic(control_time_us, start_time_, start_time_ + 0.1e6, q_init_(i), target_pos(i), 0.0, 0.0);
+        }
+    } 
+    else {
+        rd_.q_desired = target_pos;
     }
 
-    // // Spline transition for first 100ms
-    if (control_time_us < start_time_ + 0.1e6) {
-        for (int i = 0; i < MODEL_DOF; i++)
-            torque_spline_(i) = DyrosMath::cubic(control_time_us,
-                start_time_, start_time_ + 0.1e6,
-                torque_init_(i), torque_rl_(i), 0.0, 0.0);
-        rd_.torque_desired = torque_spline_;
-        if (is_on_robot_) {
-            rd_.torque_desired = WBC::JointTorqueToMotorTorque(rd_, torque_spline_);
-        }
-    } else {
-        rd_.torque_desired = torque_rl_;
-        if (is_on_robot_) {
-            rd_.torque_desired = WBC::JointTorqueToMotorTorque(rd_, torque_rl_);
-        }
+    for (int i = 0; i < MODEL_DOF; i++) 
+    {
+        torque_rl_(i) = kp_p73_(i) * (rd_.q_desired(i) - q_noise_(i)) - kd_p73_(i) * q_vel_noise_(i);
+        torque_rl_(i) = DyrosMath::minmax_cut(torque_rl_(i), -torque_bound_p73_(i), torque_bound_p73_(i));
     }
+
+    // rd_.torque_desired = torque_rl_;
+    if (is_on_robot_) {
+        rd_.torque_desired = WBC::JointTorqueToMotorTorque(rd_, torque_rl_);
+    }
+
+    // // // Spline transition for first 100ms
+    // if (control_time_us < start_time_ + 0.1e6) {
+    //     for (int i = 0; i < MODEL_DOF; i++)
+    //         torque_spline_(i) = DyrosMath::cubic(control_time_us, start_time_, start_time_ + 0.1e6, torque_init_(i), torque_rl_(i), 0.0, 0.0);
+    //     rd_.torque_desired = torque_spline_;
+    //     if (is_on_robot_) {
+    //         rd_.torque_desired = WBC::JointTorqueToMotorTorque(rd_, torque_spline_);
+    //     }
+    // } else {
+    //     rd_.torque_desired = torque_rl_;
+    //     if (is_on_robot_) {
+    //         rd_.torque_desired = WBC::JointTorqueToMotorTorque(rd_, torque_rl_);
+    //     }
+    // }
 
     // ====== Data logging (every tick, ~1kHz) ======
     static std::ofstream log_file;
