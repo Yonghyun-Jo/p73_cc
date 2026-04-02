@@ -82,7 +82,7 @@ public:
     static const int num_action = 12;         // lower body RL-controlled
     static const int num_single_obs = 47;
 
-    int history_length_ = 5;     // overwritten from ONNX shape
+    int history_length_ = 10;     // overwritten from ONNX shape
     int policy_obs_dim_ = num_single_obs * 5;
 
     //////////////////////// Observation Buffers ////////////////////////
@@ -95,7 +95,7 @@ public:
 
     //////////////////////// processNoise (TOCABI sim2real pattern) ////////////////////////
     // is_on_robot_: true=real robot (direct sensor + LPF), false=sim (noise + numerical diff + LPF)
-    bool is_on_robot_ = true;
+    bool is_on_robot_ = false;
 
     // Filtered/noised joint state — used by BOTH obs and PD (matching TOCABI)
     Matrix<double, MODEL_DOF, 1> q_noise_;       // joint position (noised in sim, direct on robot)

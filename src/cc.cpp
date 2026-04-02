@@ -29,7 +29,7 @@ CustomController::CustomController(DataContainer &dc, RobotEigenData &rd)
         weight_dir_ = "/home/bluerobin/ros2_ws/src/p73_cc/policy/policy.onnx";
     }
     else{
-        weight_dir_ = std::string(getenv("HOME")) + "/Walker_ws/src/p73_cc/policy/policy.onnx";
+        weight_dir_ = std::string(getenv("HOME")) + "/ros2_ws/src/p73_cc/policy/policy.onnx";
     }
 
     if (is_write_file_) {
@@ -189,15 +189,15 @@ void CustomController::processNoise()
 
     if (is_on_robot_)
     {
-        // Real robot: use sensor values directly
+        // Real robot: use sensor values directly, smooth velocity with LPF
         q_noise_ = rd_.q_;
-        q_vel_noise_ = rd_.q_dot_;
 
         double dt = noise_time_cur_ - noise_time_pre_;
         if (dt > 0.0) {
             double sampling_freq = 1.0 / dt;
-            q_dot_lpf_ = DyrosMath::lpf<MODEL_DOF>(q_vel_noise_, q_dot_lpf_, sampling_freq, lpf_cutoff_hz_);
+            q_dot_lpf_ = DyrosMath::lpf<MODEL_DOF>(rd_.q_dot_, q_dot_lpf_, sampling_freq, lpf_cutoff_hz_);
         }
+        q_vel_noise_ = q_dot_lpf_;
     }
     else
     {
@@ -253,7 +253,7 @@ void CustomController::processObservation()
         local_vel_yaw = target_vel_yaw_;
     }
 
-    local_vel_x = 0.1;
+    //local_vel_x = 0.1;
 
     // Velocity command from ROS2 teleop (topic: p73/cmd_vel)
     // Usage: ros2 run teleop_twist_keyboard teleop_twist_keyboard --ros-args -r cmd_vel:=p73/cmd_vel
@@ -526,7 +526,7 @@ void CustomController::computeFast()
     static bool log_opened = false;
     if (!log_opened) {
         
-        std::string log_dir = std::string(getenv("HOME")) + "/Walker_ws/src/p73_cc/logs";
+        std::string log_dir = std::string(getenv("HOME")) + "/ros2_ws/src/p73_cc/logs";
         if(is_on_robot_){
             log_dir = "/home/bluerobin/ros2_ws/src/p73_cc/logs";
         }

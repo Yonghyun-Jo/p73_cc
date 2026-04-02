@@ -158,7 +158,7 @@ def main():
     print(f"  Max diff (torch vs onnx): {max_diff:.8f}")
 
     print(f"\nExported to: {output_path}")
-    print(f"Copy to policy dir:  cp {output_path} ~/Walker_ws/src/p73_cc/policy/policy.onnx")
+    print(f"Copy to policy dir:  cp {output_path} ~/ros2_ws/src/p73_cc/policy/policy.onnx")
 
 
 if __name__ == "__main__":
