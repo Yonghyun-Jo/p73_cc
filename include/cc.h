@@ -129,6 +129,7 @@ public:
     VectorQd torque_rl_;
     VectorQd q_init_;
     VectorQd torque_init_;
+    VectorQd q_init_;
     VectorQd q_init_hold_;  // DEBUG: captured pose at mode entry
     VectorQd q_spline_;
     VectorQd torque_spline_;
@@ -158,8 +159,46 @@ public:
 
     string weight_dir_;
 
+    //////////////////////// Actuator Net ////////////////////////
+    // Per-joint neural network replacing PD control for lower body (12 joints).
+    // Network: Linear(6,32)->Softsign->Linear(32,32)->Softsign->Linear(32,32)->Softsign->Linear(32,1)
+    // Input: [pos_err_t, pos_err_{t-1}, pos_err_{t-2}, vel_t, vel_{t-1}, vel_{t-2}]
+    // Output: motor current (A) -> x100 -> torque (Nm)
+    // Computes at 50Hz (policy rate), cached for 1kHz main loop.
+    bool use_actuator_net_ = true;
+
+    struct ANetWeights {
+        Eigen::Matrix<double, 32, 6>  W0;
+        Eigen::Matrix<double, 32, 1>  b0;
+        Eigen::Matrix<double, 32, 32> W1;
+        Eigen::Matrix<double, 32, 1>  b1;
+        Eigen::Matrix<double, 32, 32> W2;
+        Eigen::Matrix<double, 32, 1>  b2;
+        Eigen::Matrix<double, 1, 32>  W3;
+        double b3;
+    };
+    std::array<ANetWeights, 12> anet_weights_;
+
+    // History buffers: [joint_idx][slot], slot: 0=~10ms ago, 1=~20ms ago
+    // Updated at 100Hz (anet_dt_). Current values are computed fresh every tick.
+    std::array<std::array<double, 2>, 12> anet_pos_err_hist_{};
+    std::array<std::array<double, 2>, 12> anet_vel_hist_{};
+    bool anet_hist_initialized_ = false;
+
+    VectorQd cached_anet_torque_;
+
+    static constexpr double anet_output_scale_ = 100.0;  // motor current (A) -> torque (Nm)
+    static constexpr double anet_dt_ = 0.01;              // history update interval (10ms, 100Hz)
+
+    void loadActuatorNets();
+    void computeActuatorNetTorques();
+    double anetForward(int joint_idx, const Eigen::Matrix<double, 6, 1>& input);
+
     //////////////////////// ROS2 Velocity Command Subscriber ////////////////////////
-    rclcpp::Node::SharedPtr vel_node_;
+    // Uses dc_.node_ (main controller node) to share its DDS participant,
+    // avoiding communication issues when running with sudo on real robot.
+    rclcpp::CallbackGroup::SharedPtr vel_cbg_;
+    rclcpp::executors::SingleThreadedExecutor vel_executor_;
     rclcpp::Subscription<geometry_msgs::msg::Twist>::SharedPtr vel_sub_;
     std::thread vel_spin_thread_;
     std::atomic<bool> vel_spin_running_{false};
