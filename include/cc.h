@@ -165,7 +165,7 @@ public:
     // Input: [pos_err_t, pos_err_{t-1}, pos_err_{t-2}, vel_t, vel_{t-1}, vel_{t-2}]
     // Output: motor current (A) -> x100 -> torque (Nm)
     // Computes at 50Hz (policy rate), cached for 1kHz main loop.
-    bool use_actuator_net_ = true;
+    bool use_actuator_net_ = false;
 
     struct ANetWeights {
         Eigen::Matrix<double, 32, 6>  W0;
