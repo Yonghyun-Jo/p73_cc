@@ -127,7 +127,6 @@ public:
     VectorQd kp_p73_, kd_p73_;
     VectorQd torque_bound_p73_;
     VectorQd torque_rl_;
-    VectorQd q_init_;
     VectorQd torque_init_;
     VectorQd q_init_;
     VectorQd q_init_hold_;  // DEBUG: captured pose at mode entry
