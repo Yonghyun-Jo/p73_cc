@@ -12,7 +12,7 @@
 //   R_HipRoll, R_HipPitch, R_HipYaw, R_Knee, R_AnklePitch, R_AnkleRoll,
 //   WaistYaw
 //
-// This is the SAME order as IsaacLab _LOWER_JOINT_NAMES and MuJoCo XML actuators.
+// This is the SAME order as IsaacLab ALL_JOINT_NAMES and MuJoCo XML actuators.
 // Therefore NO permutation is needed — data flows directly.
 // =====================================================================
 
@@ -39,7 +39,7 @@ CustomController::CustomController(DataContainer &dc, RobotEigenData &rd)
 
     loadOnnX();
     initVariable();
-    startVelSubscriber();
+    startSubscribers();
 }
 
 // =====================================================================
@@ -47,7 +47,7 @@ CustomController::CustomController(DataContainer &dc, RobotEigenData &rd)
 // =====================================================================
 void CustomController::initVariable()
 {
-    cout << "[p73_cc] Initializing variables" << endl;
+    cout << "[p73_cc] Initializing variables (MOTION MIMIC mode)" << endl;
 
     q_default_p73_ << 0.0, 0.18, 0.0, 0.35, -0.17, 0.0,
                        0.0, -0.18, 0.0, -0.35, 0.17, 0.0,
@@ -71,7 +71,7 @@ void CustomController::initVariable()
                            0.3, 1.57, 0.78, 0.0, 1.05, 0.42;
 
     rl_action_.setZero();
-    last_action_processed_.setZero();
+    last_action_raw_.setZero();
     torque_rl_.setZero();
 
     policy_frame_.assign(num_single_obs, 0.0f);
@@ -162,7 +162,9 @@ void CustomController::loadOnnX()
         if (s.size() == 2 && s[1] > 0) {
             policy_obs_dim_ = static_cast<int>(s[1]);
             if (policy_obs_dim_ % num_single_obs != 0)
-                throw std::runtime_error("[p73_cc] policy_obs_history dim must be divisible by 47.");
+                throw std::runtime_error(
+                    "[p73_cc] policy_obs dim=" + std::to_string(policy_obs_dim_) +
+                    " not divisible by 63.");
             history_length_ = policy_obs_dim_ / num_single_obs;
             cout << "[p73_cc] Inferred policy_obs_dim=" << policy_obs_dim_
                  << " (history_length=" << history_length_ << ")" << endl;
@@ -211,7 +213,15 @@ void CustomController::processNoise()
 }
 
 // =====================================================================
-// processObservation — uses q_noise_/q_vel_noise_ from processNoise()
+// processObservation — 63D per frame (motion mimic student policy)
+//
+// Layout:
+//   [0:3]   base_ang_vel           3D
+//   [3:6]   projected_gravity      3D
+//   [6:25]  motion_cmd             19D  (from /p73/motion_cmd topic)
+//   [25:38] joint_pos_rel          13D  (ALL joints incl. WaistYaw)
+//   [38:51] joint_vel              13D  (ALL joints, clip ±30, /30)
+//   [51:63] last_action            12D  (raw network output)
 // =====================================================================
 void CustomController::processObservation()
 {
@@ -224,66 +234,48 @@ void CustomController::processObservation()
     // MuJoCo gyro sensor outputs body-frame angular velocity directly.
     // NO rotation needed (unlike TOCABI which uses d->qvel world-frame).
     Vector3d ang_vel_b = rd_.q_dot_virtual_.segment(3, 3);
-    // Vector3d ang_vel_b = quatRotateInverse(q, rd_.q_dot_virtual_.segment(3, 3));
 
     Vector3d g_w(0.0, 0.0, -1.0);
     Vector3d projected_gravity_b = quatRotateInverse(q, g_w);
 
-    // Joint pos/vel — from processNoise() (noised in sim, direct on robot)
-    VectorXd q_pos = q_noise_.head<12>();
-    VectorXd q_vel = q_vel_noise_.head<12>();
-    VectorXd q_pos_rel = q_pos - q_default_p73_.head<12>();
-
-    double local_vel_x, local_vel_y, local_vel_yaw;
-    {
-        std::lock_guard<std::mutex> lock(vel_mutex_);
-        local_vel_x = target_vel_x_;
-        local_vel_y = target_vel_y_;
-        local_vel_yaw = target_vel_yaw_;
-    }
-
-
-    // Velocity command from ROS2 teleop (topic: p73/cmd_vel)
-    // Usage: ros2 run teleop_twist_keyboard teleop_twist_keyboard --ros-args -r cmd_vel:=p73/cmd_vel
-
-    double cmd_norm = std::sqrt(local_vel_x * local_vel_x +
-                                local_vel_y * local_vel_y +
-                                local_vel_yaw * local_vel_yaw);
-    double phase = 0.0;
-    if (cmd_norm > cmd_zero_max_) {
-        phase = static_cast<double>(gait_step_counter_ % gait_period_steps_) /
-                static_cast<double>(gait_period_steps_);
-    }
-    double gait_sin = std::sin(2.0 * M_PI * phase);
-    double gait_cos = std::cos(2.0 * M_PI * phase);
-
     int idx = 0;
+
+    // base_ang_vel (3D)
     policy_frame_[idx++] = static_cast<float>(ang_vel_b(0));
     policy_frame_[idx++] = static_cast<float>(ang_vel_b(1));
     policy_frame_[idx++] = static_cast<float>(ang_vel_b(2));
+
+    // projected_gravity (3D)
     policy_frame_[idx++] = static_cast<float>(projected_gravity_b(0));
     policy_frame_[idx++] = static_cast<float>(projected_gravity_b(1));
     policy_frame_[idx++] = static_cast<float>(projected_gravity_b(2));
-    policy_frame_[idx++] = static_cast<float>(local_vel_x);
-    policy_frame_[idx++] = static_cast<float>(local_vel_y);
-    policy_frame_[idx++] = static_cast<float>(local_vel_yaw);
-    policy_frame_[idx++] = static_cast<float>(gait_sin);
-    policy_frame_[idx++] = static_cast<float>(gait_cos);
-    for (int i = 0; i < 12; i++)
-        policy_frame_[idx++] = static_cast<float>(q_pos_rel(i));
-    for (int i = 0; i < 12; i++) {
-        // Match IsaacLab ObsTerm(clip=(-30,30), scale=1/30)
-        double v_clip = DyrosMath::minmax_cut(q_vel(i), -30.0, 30.0);
+
+    // motion_cmd (19D) from /p73/motion_cmd topic
+    {
+        std::lock_guard<std::mutex> lock(motion_cmd_mutex_);
+        for (int i = 0; i < num_motion_cmd; i++)
+            policy_frame_[idx++] = static_cast<float>(motion_cmd_[i]);
+    }
+
+    // joint_pos_rel (13D) — ALL joints including WaistYaw, relative to default
+    for (int i = 0; i < MODEL_DOF; i++) {
+        policy_frame_[idx++] = static_cast<float>(q_noise_(i) - q_default_p73_(i));
+    }
+
+    // joint_vel (13D) — ALL joints including WaistYaw, clipped & scaled
+    for (int i = 0; i < MODEL_DOF; i++) {
+        double v_clip = DyrosMath::minmax_cut(q_vel_noise_(i), -30.0, 30.0);
         policy_frame_[idx++] = static_cast<float>(v_clip / 30.0);
     }
-    for (int i = 0; i < num_action; i++)
-        policy_frame_[idx++] = static_cast<float>(last_action_processed_(i));
 
-    // Frame-major history: [frame0(47D), frame1(47D), ..., frame4(47D)]
-    // Each frame is a complete 47D observation. Oldest at front, newest at back.
-    // This matches IsaacLab's P73ObservationManager layout.
+    // last_action (12D) — raw network output (mdp.last_action = env.action_manager.action)
+    for (int i = 0; i < num_action; i++)
+        policy_frame_[idx++] = static_cast<float>(last_action_raw_(i));
+
+    // Frame-major history: [frame0(63D), frame1(63D), ..., frame(H-1)(63D)]
+    // Each frame is a complete 63D observation. Oldest at front, newest at back.
     const int H = history_length_;
-    const int F = num_single_obs;  // 47
+    const int F = num_single_obs;  // 63
 
     if (!policy_hist_initialized_) {
         // Fill all H frames with the current frame
@@ -314,8 +306,6 @@ void CustomController::processObservation()
         if (critic_in.size() >= static_cast<size_t>(9 + num_single_obs))
             std::memcpy(critic_in.data() + 9, policy_frame_.data(), sizeof(float) * num_single_obs);
     }
-
-    gait_step_counter_++;
 }
 
 // =====================================================================
@@ -345,8 +335,9 @@ void CustomController::feedforwardPolicy()
         value_ = static_cast<double>(value_ptr[0]);
     }
 
+    // Store raw network output for observation (mdp.last_action = raw output)
     for (int i = 0; i < num_action; i++)
-        last_action_processed_(i) = DyrosMath::minmax_cut(rl_action_(i) * action_scale_, -1.0, 1.0);
+        last_action_raw_(i) = rl_action_(i);
     // local_output destroyed here — Ort::Value cleanup happens at function exit
 }
 
@@ -365,8 +356,7 @@ void CustomController::computeFast()
         torque_init_ = rd_.torque_desired;
         time_inference_pre_ = control_time_us - policy_dt_ * 1e6;
         rl_action_.setZero();
-        last_action_processed_.setZero();
-        gait_step_counter_ = 0;
+        last_action_raw_.setZero();
         policy_hist_initialized_ = false;
         std::fill(policy_obs_hist_term_major_.begin(), policy_obs_hist_term_major_.end(), 0.0f);
 
@@ -377,7 +367,7 @@ void CustomController::computeFast()
         noise_time_cur_ = control_time_us / 1e6;
         noise_time_pre_ = noise_time_cur_ - 0.001;
 
-        cout << "[p73_cc] Mode started (is_on_robot=" << is_on_robot_ << ")" << endl;
+        cout << "[p73_cc] Mode started (is_on_robot=" << is_on_robot_ << ", MOTION MIMIC)" << endl;
 
         processNoise();
         processObservation();
@@ -399,13 +389,14 @@ void CustomController::computeFast()
         // Dump first N policy steps to JSONL + console
         constexpr int dump_max_steps = 25;
         if (policy_step_count <= dump_max_steps) {
-            constexpr int dims[] = {3, 3, 3, 1, 1, 12, 12, 12};
-            const char* term_names[] = {"ang_vel", "gravity", "cmd", "gait_sin", "gait_cos",
+            // 63D frame: 6 terms
+            constexpr int dims[] = {3, 3, 19, 13, 13, 12};
+            const char* term_names[] = {"ang_vel", "gravity", "motion_cmd",
                                         "joint_pos", "joint_vel", "last_action"};
+            constexpr int num_terms = 6;
             int H = history_length_;
 
-            // Extract newest frame (47D) from frame-major buffer
-            // Frame-major: newest frame is the last 47 elements
+            // Extract newest frame (63D) from frame-major buffer
             const float *newest = policy_obs_hist_term_major_.data() + (H - 1) * num_single_obs;
             int fi = 0;
 
@@ -415,8 +406,8 @@ void CustomController::computeFast()
                 dump_file << std::fixed << std::setprecision(8);
                 dump_file << "{\"step\":" << policy_step_count - 1;
 
-                // full obs (235D)
-                dump_file << ",\"obs_235\":[";
+                // full obs
+                dump_file << ",\"obs_" << policy_obs_dim_ << "\":[";
                 for (int i = 0; i < policy_obs_dim_; i++)
                     dump_file << policy_obs_hist_term_major_[i] << (i < policy_obs_dim_-1 ? "," : "");
                 dump_file << "]";
@@ -428,19 +419,14 @@ void CustomController::computeFast()
                 dump_file << "]";
 
                 // per-term newest frame
-                dump_file << ",\"frame_47\":{";
+                dump_file << ",\"frame_63\":{";
                 fi = 0;
-                for (int t = 0; t < 8; t++) {
-                    dump_file << "\"" << term_names[t] << "\":";
-                    if (dims[t] == 1) {
-                        dump_file << newest[fi++];
-                    } else {
-                        dump_file << "[";
-                        for (int d = 0; d < dims[t]; d++)
-                            dump_file << newest[fi++] << (d < dims[t]-1 ? "," : "");
-                        dump_file << "]";
-                    }
-                    if (t < 7) dump_file << ",";
+                for (int t = 0; t < num_terms; t++) {
+                    dump_file << "\"" << term_names[t] << "\":[";
+                    for (int d = 0; d < dims[t]; d++)
+                        dump_file << newest[fi++] << (d < dims[t]-1 ? "," : "");
+                    dump_file << "]";
+                    if (t < num_terms - 1) dump_file << ",";
                 }
                 dump_file << "}";
 
@@ -465,9 +451,9 @@ void CustomController::computeFast()
             // Console output (first 5 steps only)
             if (policy_step_count <= 5) {
                 Eigen::IOFormat fmt(6, 0, ", ", ", ");
-                cout << "\n=== MuJoCo STEP " << policy_step_count - 1 << " ===" << endl;
+                cout << "\n=== MuJoCo STEP " << policy_step_count - 1 << " (MOTION MIMIC) ===" << endl;
                 fi = 0;
-                for (int t = 0; t < 8; t++) {
+                for (int t = 0; t < num_terms; t++) {
                     cout << "  " << term_names[t] << ": ";
                     for (int d = 0; d < dims[t]; d++)
                         cout << newest[fi++] << " ";
@@ -478,11 +464,12 @@ void CustomController::computeFast()
         }
     }
 
-    // Action → Target Position (used by PD for q_desired logging)
+    // Action → Target Position
+    // Motion mimic: q_target = q_default + clip(rl_action, ±2.0) * per_joint_scale
     VectorQd target_pos = q_default_p73_;
     for (int i = 0; i < num_action; i++) {
-        double dq = rl_action_(i) * action_scale_;
-        dq = DyrosMath::minmax_cut(dq, -1.0, 1.0);
+        double action_clipped = DyrosMath::minmax_cut(rl_action_(i), -2.0, 2.0);
+        double dq = action_clipped * action_scales_[i];
         target_pos(i) = q_default_p73_(i) + dq;
         target_pos(i) = DyrosMath::minmax_cut(target_pos(i), q_limit_lower_p73_(i), q_limit_upper_p73_(i));
     }
@@ -505,22 +492,8 @@ void CustomController::computeFast()
     }
 
     // torque_bound_p73_ is the MOTOR-side limit. The clamp must happen on the
-    // motor-space torque
-    // (τ_m = J^T τ_j), not on joint-space torque.
-    //
-    //   Real robot: rd_.four_bar_Jaco_ is populated by state_estimator; map
-    //               τ_j → τ_m, clamp τ_m, send as motor torque. state_estimator
-    //               also clamps τ_m at the ECAT boundary (double safety).
-    //
-    //   MuJoCo   : the sim model has no 4-bar (each <motor> acts directly on its
-    //               joint), and state_estimator does not populate four_bar_Jaco_
-    //               in simMode. We run the 4-bar kinematics locally here: compute
-    //               motor pos from current joint pos, evaluate J, then apply
-    //               τ_j' = J^{-T} · clamp(J^T τ_j, ±τ_m_bound). Feeding τ_j'
-    //               back to MuJoCo reproduces the real motor-limit envelope
-    //               (nonlinear, configuration-dependent) at the joint level.
+    // motor-space torque (τ_m = J^T τ_j), not on joint-space torque.
     if (is_on_robot_) {
-        // VectorQd torque_motor = WBC::JointTorqueToMotorTorque(rd_, torque_rl_);
         VectorQd torque_motor = rd_.four_bar_Jaco_.transpose() * torque_rl_;
         for (int i = 0; i < MODEL_DOF; i++) {
             torque_motor(i) = DyrosMath::minmax_cut(torque_motor(i), -torque_bound_p73_(i), torque_bound_p73_(i));
@@ -539,25 +512,8 @@ void CustomController::computeFast()
         for (int i = 0; i < MODEL_DOF; i++) {
             torque_motor(i) = DyrosMath::minmax_cut(torque_motor(i), -torque_bound_p73_(i), torque_bound_p73_(i));
         }
-        // τ_j' = J^{-T} τ_m_clamped — joint-space torque that realizes the
-        // clamped motor torque through the 4-bar.
         rd_.torque_desired = J.transpose().inverse() * torque_motor;
     }
-
-    // // // Spline transition for first 100ms
-    // if (control_time_us < start_time_ + 0.1e6) {
-    //     for (int i = 0; i < MODEL_DOF; i++)
-    //         torque_spline_(i) = DyrosMath::cubic(control_time_us, start_time_, start_time_ + 0.1e6, torque_init_(i), torque_rl_(i), 0.0, 0.0);
-    //     rd_.torque_desired = torque_spline_;
-    //     if (is_on_robot_) {
-    //         rd_.torque_desired = WBC::JointTorqueToMotorTorque(rd_, torque_spline_);
-    //     }
-    // } else {
-    //     rd_.torque_desired = torque_rl_;
-    //     if (is_on_robot_) {
-    //         rd_.torque_desired = WBC::JointTorqueToMotorTorque(rd_, torque_rl_);
-    //     }
-    // }
 
     // ====== Data logging (every tick, ~1kHz) ======
     static std::ofstream log_file;
@@ -582,37 +538,31 @@ void CustomController::computeFast()
         log_file << "time";
         // IMU quaternion (xyzw)
         log_file << ",quat_x,quat_y,quat_z,quat_w";
-        // Angular velocity body frame (from q_dot_virtual_)
+        // Angular velocity body frame
         log_file << ",ang_vel_bx,ang_vel_by,ang_vel_bz";
         // Projected gravity body frame
         log_file << ",proj_grav_x,proj_grav_y,proj_grav_z";
-        // Velocity command
-        log_file << ",cmd_vx,cmd_vy,cmd_vyaw";
-        // Gait phase
-        log_file << ",gait_sin,gait_cos";
-        // Joint pos measured (13 DOF, raw) — analog of joint_position_log
+        // Motion reference command (19D)
+        for (int i = 0; i < num_motion_cmd; i++) log_file << ",motion_cmd_" << i;
+        // Joint pos measured (13 DOF, raw)
         for (int i = 0; i < MODEL_DOF; i++) log_file << ",q_raw_" << i;
-        // Joint pos desired (13 DOF) — analog of joint_desired_log
+        // Joint pos desired (13 DOF)
         for (int i = 0; i < MODEL_DOF; i++) log_file << ",q_des_" << i;
-        // Joint pos relative to default (12)
-        for (int i = 0; i < 12; i++) log_file << ",q_rel_" << i;
-        // Joint vel measured (13 DOF) — analog of joint_velocity_log
+        // Joint pos relative to default (13 DOF)
+        for (int i = 0; i < MODEL_DOF; i++) log_file << ",q_rel_" << i;
+        // Joint vel measured (13 DOF)
         for (int i = 0; i < MODEL_DOF; i++) log_file << ",qdot_" << i;
-        // Policy obs frame (47D, what actually goes into network)
+        // Policy obs frame (63D)
         for (int i = 0; i < num_single_obs; i++) log_file << ",obs_" << i;
         // RL actions (12)
         for (int i = 0; i < num_action; i++) log_file << ",action_" << i;
-        // Torque (joint space) — analog of torque_joint_log: [desired, measured]
-        // desired: PD output BEFORE 4-bar
+        // Torque (joint space) — desired then measured (13 + 13)
         for (int i = 0; i < MODEL_DOF; i++) log_file << ",tau_joint_" << i;
-        // measured: rd_.q_torque_ from ECAT current readback (joint side)
         for (int i = 0; i < MODEL_DOF; i++) log_file << ",tau_meas_joint_" << i;
-        // Torque (motor space) — analog of torque_motor_log: [desired, measured]
-        // desired: AFTER 4-bar (what actually gets sent)
+        // Torque (motor space) — desired then measured (13 + 13)
         for (int i = 0; i < MODEL_DOF; i++) log_file << ",tau_motor_" << i;
-        // measured: rd_.q_torque_motor_ from ECAT (motor side, real robot only)
         for (int i = 0; i < MODEL_DOF; i++) log_file << ",tau_meas_motor_" << i;
-        // Linear velocity world frame (for critic/debug)
+        // Linear velocity world frame (for debug)
         log_file << ",lin_vel_wx,lin_vel_wy,lin_vel_wz";
         // Value function output
         log_file << ",value";
@@ -622,7 +572,6 @@ void CustomController::computeFast()
     }
 
     if (log_file.is_open()) {
-        // Recompute quantities for logging (some already in policy_frame_)
         Quaterniond q_log;
         q_log.x() = rd_.q_virtual_(3);
         q_log.y() = rd_.q_virtual_(4);
@@ -633,21 +582,7 @@ void CustomController::computeFast()
         Vector3d proj_grav_log = quatRotateInverse(q_log, g_w_log);
         Vector3d lin_vel_w_log = rd_.q_dot_virtual_.segment<3>(0);
 
-        // Torque before 4-bar (reconstruct from torque_rl_ or torque_spline_)
         VectorQd tau_joint = (control_time_us < start_time_ + 0.1e6) ? torque_spline_ : torque_rl_;
-
-        double local_vx, local_vy, local_vyaw;
-        {
-            std::lock_guard<std::mutex> lock(vel_mutex_);
-            local_vx = target_vel_x_;
-            local_vy = target_vel_y_;
-            local_vyaw = target_vel_yaw_;
-        }
-
-        double cmd_n = std::sqrt(local_vx*local_vx + local_vy*local_vy + local_vyaw*local_vyaw);
-        double ph = 0.0;
-        if (cmd_n > cmd_zero_max_)
-            ph = static_cast<double>(gait_step_counter_ % gait_period_steps_) / static_cast<double>(gait_period_steps_);
 
         log_file << control_time_us / 1e6;
         // Quaternion
@@ -656,19 +591,20 @@ void CustomController::computeFast()
         log_file << "," << ang_vel_log(0) << "," << ang_vel_log(1) << "," << ang_vel_log(2);
         // Projected gravity
         log_file << "," << proj_grav_log(0) << "," << proj_grav_log(1) << "," << proj_grav_log(2);
-        // Cmd vel
-        log_file << "," << local_vx << "," << local_vy << "," << local_vyaw;
-        // Gait
-        log_file << "," << std::sin(2.0*M_PI*ph) << "," << std::cos(2.0*M_PI*ph);
+        // Motion reference command (19D)
+        {
+            std::lock_guard<std::mutex> lock(motion_cmd_mutex_);
+            for (int i = 0; i < num_motion_cmd; i++) log_file << "," << motion_cmd_[i];
+        }
         // Joint pos measured (13)
         for (int i = 0; i < MODEL_DOF; i++) log_file << "," << rd_.q_(i);
         // Joint pos desired (13)
         for (int i = 0; i < MODEL_DOF; i++) log_file << "," << rd_.q_desired(i);
-        // Joint pos relative (12)
-        for (int i = 0; i < 12; i++) log_file << "," << (q_noise_(i) - q_default_p73_(i));
+        // Joint pos relative (13)
+        for (int i = 0; i < MODEL_DOF; i++) log_file << "," << (q_noise_(i) - q_default_p73_(i));
         // Joint vel measured (13)
         for (int i = 0; i < MODEL_DOF; i++) log_file << "," << q_vel_noise_(i);
-        // Policy frame (47D)
+        // Policy frame (63D)
         for (int i = 0; i < num_single_obs; i++) log_file << "," << policy_frame_[i];
         // Actions (12)
         for (int i = 0; i < num_action; i++) log_file << "," << rl_action_(i);
@@ -694,8 +630,7 @@ void CustomController::computeFast()
     if (dbg++ % 500 == 0) {
         Eigen::IOFormat fmt(3, 0, " ", " ");
         cout << "[cc] t=" << control_time_us/1e6
-             << " act: " << rl_action_.transpose().format(fmt)
-             << " | gait: " << gait_step_counter_ << endl;
+             << " act: " << rl_action_.transpose().format(fmt) << endl;
     }
 }
 
@@ -720,17 +655,19 @@ Vector3d CustomController::quatRotateInverse(const Quaterniond &q, const Vector3
 }
 
 // =====================================================================
-// ROS2 Velocity Command Subscriber
+// ROS2 Motion Command Subscriber
 // =====================================================================
-void CustomController::velCmdCallback(const geometry_msgs::msg::Twist::SharedPtr msg)
+void CustomController::motionCmdCallback(const std_msgs::msg::Float64MultiArray::SharedPtr msg)
 {
-    std::lock_guard<std::mutex> lock(vel_mutex_);
-    target_vel_x_ = msg->linear.x;
-    target_vel_y_ = msg->linear.y;
-    target_vel_yaw_ = msg->angular.z;
+    if (msg->data.size() < static_cast<size_t>(num_motion_cmd)) {
+        return;  // Silently ignore malformed messages
+    }
+    std::lock_guard<std::mutex> lock(motion_cmd_mutex_);
+    for (int i = 0; i < num_motion_cmd; i++)
+        motion_cmd_[i] = msg->data[i];
 }
 
-void CustomController::startVelSubscriber()
+void CustomController::startSubscribers()
 {
     // Use the main controller node (dc_.node_) instead of creating a separate node.
     // This shares the same DDS participant as GUI/task command subscriptions,
@@ -739,9 +676,10 @@ void CustomController::startVelSubscriber()
     rclcpp::SubscriptionOptions opts;
     opts.callback_group = vel_cbg_;
 
-    vel_sub_ = dc_.node_->create_subscription<geometry_msgs::msg::Twist>(
-        "/p73/cmd_vel", 10,
-        std::bind(&CustomController::velCmdCallback, this, std::placeholders::_1),
+    // Motion reference command subscriber (19D Float64MultiArray)
+    motion_cmd_sub_ = dc_.node_->create_subscription<std_msgs::msg::Float64MultiArray>(
+        "/p73/motion_cmd", 10,
+        std::bind(&CustomController::motionCmdCallback, this, std::placeholders::_1),
         opts);
 
     vel_executor_.add_callback_group(vel_cbg_, dc_.node_->get_node_base_interface());
@@ -753,13 +691,13 @@ void CustomController::startVelSubscriber()
             std::this_thread::sleep_for(std::chrono::milliseconds(5));
         }
     });
-    cout << "[p73_cc] Velocity command subscriber started on topic: /p73/cmd_vel" << endl;
-    cout << "[p73_cc] Usage: python3 ~/Walker_ws/src/p73_cc/scripts/walker_teleop.py" << endl;
+    cout << "[p73_cc] Motion command subscriber started on topic: /p73/motion_cmd (19D Float64MultiArray)" << endl;
+    cout << "[p73_cc]   Layout: root_vel_xy(2) + root_z(1) + roll(1) + pitch(1) + yaw_vel(1) + dof_pos(13)" << endl;
 }
 
-void CustomController::stopVelSubscriber()
+void CustomController::stopSubscribers()
 {
     vel_spin_running_ = false;
     if (vel_spin_thread_.joinable()) vel_spin_thread_.join();
-    vel_sub_.reset();
+    motion_cmd_sub_.reset();
 }

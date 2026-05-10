@@ -2,6 +2,10 @@
 build/
 install/
 log/
+logs/
+
+# Third-party libraries (large binaries)
+thirdparty/
 
 # Python
 __pycache__/
