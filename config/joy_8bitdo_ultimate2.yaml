@@ -36,7 +36,7 @@ p73_joy_teleop:
     require_deadman: false      # set true on real robot for safety
     scale_step: 0.10
     scale_min: 0.20
-    scale_max: 1.50
+    scale_max: 1.00
 
     # ---- Stream behavior ----
     publish_rate_hz: 50.0
