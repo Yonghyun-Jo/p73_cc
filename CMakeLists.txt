@@ -12,6 +12,7 @@ set(ONNXRT_DIR ${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/onnxruntime)
 find_package(ament_cmake REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(geometry_msgs REQUIRED)
+find_package(std_msgs REQUIRED)
 find_package(p73_lib REQUIRED)
 find_package(p73_msgs REQUIRED)
 find_package(br_driver REQUIRED)
@@ -30,6 +31,7 @@ add_library(${PROJECT_NAME}
 ament_target_dependencies(${PROJECT_NAME}
   rclcpp
   geometry_msgs
+  std_msgs
   p73_lib
   p73_msgs
 )
