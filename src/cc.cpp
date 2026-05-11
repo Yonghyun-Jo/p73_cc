@@ -77,6 +77,14 @@ void CustomController::initVariable()
     policy_frame_.assign(num_single_obs, 0.0f);
     policy_obs_hist_term_major_.assign(policy_obs_dim_, 0.0f);
     policy_hist_initialized_ = false;
+
+    // Initialize motion_cmd_ to standing reference (not zeros).
+    // motion_cmd=0 is out-of-distribution (means root_z=0, all joints=0).
+    // Standing reference: root_vel_xy=0, root_z=0.82, roll=0, pitch=0, yaw_rate=0, dof_pos=q_default
+    motion_cmd_.fill(0.0);
+    motion_cmd_[2] = 0.82;  // root_z (standing height)
+    for (int i = 0; i < MODEL_DOF; i++)
+        motion_cmd_[6 + i] = q_default_p73_(i);  // dof_pos = q_default
 }
 
 // =====================================================================
@@ -448,29 +456,20 @@ void CustomController::computeFast()
                 dump_file.flush();
             }
 
-            // Console output (first 5 steps only)
-            if (policy_step_count <= 5) {
-                Eigen::IOFormat fmt(6, 0, ", ", ", ");
-                cout << "\n=== MuJoCo STEP " << policy_step_count - 1 << " (MOTION MIMIC) ===" << endl;
-                fi = 0;
-                for (int t = 0; t < num_terms; t++) {
-                    cout << "  " << term_names[t] << ": ";
-                    for (int d = 0; d < dims[t]; d++)
-                        cout << newest[fi++] << " ";
-                    cout << endl;
-                }
-                cout << "  actions: " << rl_action_.transpose().format(fmt) << endl;
-            }
         }
     }
 
     // Action → Target Position
-    // Motion mimic: q_target = q_default + clip(rl_action, ±2.0) * per_joint_scale
+    // Match Isaac Lab JointPositionAction.process_actions:
+    //   processed = raw * scale + q_default   (use_default_offset=True)
+    //   processed = clamp(processed, clip)     (clip = ±2.0 from ActionsCfg)
+    // Then clamp to physical joint limits to prevent PD from fighting
+    // unreachable targets (Isaac Lab's PhysX enforces limits physically;
+    // here we must enforce them explicitly to avoid sustained max torque).
     VectorQd target_pos = q_default_p73_;
     for (int i = 0; i < num_action; i++) {
-        double action_clipped = DyrosMath::minmax_cut(rl_action_(i), -2.0, 2.0);
-        double dq = action_clipped * action_scales_[i];
-        target_pos(i) = q_default_p73_(i) + dq;
+        target_pos(i) = rl_action_(i) * action_scales_[i] + q_default_p73_(i);
+        target_pos(i) = DyrosMath::minmax_cut(target_pos(i), -2.0, 2.0);
         target_pos(i) = DyrosMath::minmax_cut(target_pos(i), q_limit_lower_p73_(i), q_limit_upper_p73_(i));
     }
 
