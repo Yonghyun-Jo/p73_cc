@@ -234,12 +234,13 @@ void CustomController::processObservation()
     VectorXd q_vel = q_vel_noise_.head<12>();
     VectorXd q_pos_rel = q_pos - q_default_p73_.head<12>();
 
-    double local_vel_x, local_vel_y, local_vel_yaw;
+    double local_vel_x, local_vel_y, local_vel_yaw, local_height;
     {
         std::lock_guard<std::mutex> lock(vel_mutex_);
         local_vel_x = target_vel_x_;
         local_vel_y = target_vel_y_;
         local_vel_yaw = target_vel_yaw_;
+        local_height = target_height_;
     }
 
 
@@ -267,6 +268,7 @@ void CustomController::processObservation()
     policy_frame_[idx++] = static_cast<float>(local_vel_x);
     policy_frame_[idx++] = static_cast<float>(local_vel_y);
     policy_frame_[idx++] = static_cast<float>(local_vel_yaw);
+    policy_frame_[idx++] = static_cast<float>(local_height);
     policy_frame_[idx++] = static_cast<float>(gait_sin);
     policy_frame_[idx++] = static_cast<float>(gait_cos);
     for (int i = 0; i < 12; i++)
@@ -279,11 +281,11 @@ void CustomController::processObservation()
     for (int i = 0; i < num_action; i++)
         policy_frame_[idx++] = static_cast<float>(last_action_processed_(i));
 
-    // Frame-major history: [frame0(47D), frame1(47D), ..., frame4(47D)]
-    // Each frame is a complete 47D observation. Oldest at front, newest at back.
+    // Frame-major history: [frame0(48D), frame1(48D), ..., frameH-1(48D)]
+    // Each frame is a complete 48D observation. Oldest at front, newest at back.
     // This matches IsaacLab's P73ObservationManager layout.
     const int H = history_length_;
-    const int F = num_single_obs;  // 47
+    const int F = num_single_obs;  // 48
 
     if (!policy_hist_initialized_) {
         // Fill all H frames with the current frame
@@ -307,12 +309,15 @@ void CustomController::processObservation()
         std::vector<float> &critic_in = input_states_buffer[input_critic_idx_];
         Vector3d lin_vel_w = rd_.q_dot_virtual_.segment<3>(0);
         Vector3d lin_vel_b = quatRotateInverse(q, lin_vel_w);
+        // critic prefix: [vel4(vx,vy,wz,vz), foot6, height1] = 11D
         critic_in[0] = static_cast<float>(lin_vel_b(0));
         critic_in[1] = static_cast<float>(lin_vel_b(1));
         critic_in[2] = static_cast<float>(ang_vel_b(2));
-        for (int i = 3; i < 9; i++) critic_in[i] = 0.0f;
-        if (critic_in.size() >= static_cast<size_t>(9 + num_single_obs))
-            std::memcpy(critic_in.data() + 9, policy_frame_.data(), sizeof(float) * num_single_obs);
+        critic_in[3] = static_cast<float>(lin_vel_b(2));  // vz
+        for (int i = 4; i < 10; i++) critic_in[i] = 0.0f;  // foot6 placeholder
+        critic_in[10] = static_cast<float>(rd_.q_virtual_(2));  // height (pos_z)
+        if (critic_in.size() >= static_cast<size_t>(11 + num_single_obs))
+            std::memcpy(critic_in.data() + 11, policy_frame_.data(), sizeof(float) * num_single_obs);
     }
 
     gait_step_counter_++;
@@ -346,7 +351,7 @@ void CustomController::feedforwardPolicy()
     }
 
     for (int i = 0; i < num_action; i++)
-        last_action_processed_(i) = DyrosMath::minmax_cut(rl_action_(i) * action_scale_, -1.0, 1.0);
+        last_action_processed_(i) = DyrosMath::minmax_cut(rl_action_(i) * action_scale_, -2.0, 2.0);
     // local_output destroyed here — Ort::Value cleanup happens at function exit
 }
 
@@ -399,13 +404,13 @@ void CustomController::computeFast()
         // Dump first N policy steps to JSONL + console
         constexpr int dump_max_steps = 25;
         if (policy_step_count <= dump_max_steps) {
-            constexpr int dims[] = {3, 3, 3, 1, 1, 12, 12, 12};
-            const char* term_names[] = {"ang_vel", "gravity", "cmd", "gait_sin", "gait_cos",
+            constexpr int dims[] = {3, 3, 3, 1, 1, 1, 12, 12, 12};
+            const char* term_names[] = {"ang_vel", "gravity", "cmd", "height_cmd", "gait_sin", "gait_cos",
                                         "joint_pos", "joint_vel", "last_action"};
             int H = history_length_;
 
-            // Extract newest frame (47D) from frame-major buffer
-            // Frame-major: newest frame is the last 47 elements
+            // Extract newest frame (48D) from frame-major buffer
+            // Frame-major: newest frame is the last 48 elements
             const float *newest = policy_obs_hist_term_major_.data() + (H - 1) * num_single_obs;
             int fi = 0;
 
@@ -428,9 +433,9 @@ void CustomController::computeFast()
                 dump_file << "]";
 
                 // per-term newest frame
-                dump_file << ",\"frame_47\":{";
+                dump_file << ",\"frame_48\":{";
                 fi = 0;
-                for (int t = 0; t < 8; t++) {
+                for (int t = 0; t < 9; t++) {
                     dump_file << "\"" << term_names[t] << "\":";
                     if (dims[t] == 1) {
                         dump_file << newest[fi++];
@@ -440,7 +445,7 @@ void CustomController::computeFast()
                             dump_file << newest[fi++] << (d < dims[t]-1 ? "," : "");
                         dump_file << "]";
                     }
-                    if (t < 7) dump_file << ",";
+                    if (t < 8) dump_file << ",";
                 }
                 dump_file << "}";
 
@@ -467,7 +472,7 @@ void CustomController::computeFast()
                 Eigen::IOFormat fmt(6, 0, ", ", ", ");
                 cout << "\n=== MuJoCo STEP " << policy_step_count - 1 << " ===" << endl;
                 fi = 0;
-                for (int t = 0; t < 8; t++) {
+                for (int t = 0; t < 9; t++) {
                     cout << "  " << term_names[t] << ": ";
                     for (int d = 0; d < dims[t]; d++)
                         cout << newest[fi++] << " ";
@@ -482,7 +487,7 @@ void CustomController::computeFast()
     VectorQd target_pos = q_default_p73_;
     for (int i = 0; i < num_action; i++) {
         double dq = rl_action_(i) * action_scale_;
-        dq = DyrosMath::minmax_cut(dq, -1.0, 1.0);
+        dq = DyrosMath::minmax_cut(dq, -2.0, 2.0);
         target_pos(i) = q_default_p73_(i) + dq;
         target_pos(i) = DyrosMath::minmax_cut(target_pos(i), q_limit_lower_p73_(i), q_limit_upper_p73_(i));
     }
@@ -728,6 +733,9 @@ void CustomController::velCmdCallback(const geometry_msgs::msg::Twist::SharedPtr
     target_vel_x_ = msg->linear.x;
     target_vel_y_ = msg->linear.y;
     target_vel_yaw_ = msg->angular.z;
+    // Height command via Twist.linear.z (0 means "keep current")
+    if (std::abs(msg->linear.z) > 1e-6)
+        target_height_ = msg->linear.z;
 }
 
 void CustomController::startVelSubscriber()

@@ -98,8 +98,8 @@ class JoyConfig:
     BTN_PUSH      = 0   # A
     BTN_VIZ       = 2   # X
     BTN_RESET     = 3   # Y  → also switches to KEY mode
-    BTN_DEADMAN   = 4   # LB
-    BTN_SCALE_UP  = 5   # RB
+    BTN_CROUCH    = 4   # LB → lower height
+    BTN_STAND     = 5   # RB → raise height
     BTN_SCALE_DN  = 6   # Back/Select
     BTN_ESTOP     = 7   # Start
 
@@ -114,20 +114,26 @@ class JoyConfig:
 KEY_STEP  = 0.1
 KEY_MAX_V = 1.0
 KEY_MAX_WZ = 0.6
+HEIGHT_STEP = 0.05
+HEIGHT_MIN = 0.55
+HEIGHT_MAX = 0.89
 PUB_HZ    = 50.0
 
 KEY_BINDINGS = {
     'w': ('vx', +KEY_STEP),  's': ('vx', -KEY_STEP),
     'a': ('vy', +KEY_STEP),  'd': ('vy', -KEY_STEP),
     'q': ('wz', +KEY_STEP),  'e': ('wz', -KEY_STEP),
+    'r': ('h', -HEIGHT_STEP),  'f': ('h', +HEIGHT_STEP),
 }
 
 BANNER = """
-=== Walker Teleop ===
-  [KEY] w/s:fwd/back  a/d:left/right  q/e:rotate  space:stop
+=== Walker Teleop (Crouch) ===
+  [KEY] w/s:fwd/back  a/d:left/right  q/e:rotate
+        r:crouch  f:stand  space:stop
   [JOY] left stick:vx,vy  right stick:wz
+        LB:crouch  RB:stand
   Mode: j→JOY  k→KEY  Y button→KEY    Ctrl+C: quit
-=====================
+===============================
 """
 
 
@@ -160,6 +166,9 @@ class WalkerTeleop(Node):
         self.key_vx = 0.0
         self.key_vy = 0.0
         self.key_wz = 0.0
+
+        # Height command (shared across modes)
+        self.height = HEIGHT_MAX  # default standing
 
         # Joystick
         self.joy_vx = 0.0
@@ -205,21 +214,25 @@ class WalkerTeleop(Node):
         self.joy_vy = proc_vy * cfg.max_vy * self.scale
         self.joy_wz = proc_wz * cfg.max_wz * self.scale
 
-        # Deadman
-        self.deadman_held = (bt(cfg.BTN_DEADMAN, default=1) == 1) or (not cfg.require_deadman)
+        # No deadman in crouch branch — always active
+        self.deadman_held = True
 
         # Buttons (rising edge only)
         if pressed(cfg.BTN_RESET):       # Y → KEY mode + reset scale
             self.mode = "KEY"
             self.key_vx = self.key_vy = self.key_wz = 0.0
+            self.height = HEIGHT_MAX
             self.scale = 1.0
             self.estop_active = False
 
         if pressed(cfg.BTN_ESTOP):
             self.estop_active = not self.estop_active
 
-        if pressed(cfg.BTN_SCALE_UP):
-            self.scale = min(cfg.SCALE_MAX, self.scale + cfg.SCALE_STEP)
+        if pressed(cfg.BTN_CROUCH):      # LB → lower height
+            self.height = clamp(self.height - HEIGHT_STEP, HEIGHT_MIN, HEIGHT_MAX)
+
+        if pressed(cfg.BTN_STAND):       # RB → raise height
+            self.height = clamp(self.height + HEIGHT_STEP, HEIGHT_MIN, HEIGHT_MAX)
 
         if pressed(cfg.BTN_SCALE_DN):
             self.scale = max(cfg.SCALE_MIN, self.scale - cfg.SCALE_STEP)
@@ -243,9 +256,12 @@ class WalkerTeleop(Node):
         elif self.mode == "KEY":
             if key == ' ':
                 self.key_vx = self.key_vy = self.key_wz = 0.0
+                self.height = HEIGHT_MAX
             elif key.lower() in KEY_BINDINGS:
                 axis, delta = KEY_BINDINGS[key.lower()]
-                if axis == 'vx':
+                if axis == 'h':
+                    self.height = clamp(self.height + delta, HEIGHT_MIN, HEIGHT_MAX)
+                elif axis == 'vx':
                     self.key_vx = clamp(self.key_vx + delta, -KEY_MAX_V, KEY_MAX_V)
                 elif axis == 'vy':
                     self.key_vy = clamp(self.key_vy + delta, -KEY_MAX_V, KEY_MAX_V)
@@ -263,32 +279,34 @@ class WalkerTeleop(Node):
         msg = Twist()
 
         if self.estop_active:
-            pass  # all zeros
+            msg.linear.z = self.height  # keep height even in estop
         elif self.mode == "JOY" and self.joy_alive and self.deadman_held:
             msg.linear.x  = float(self.joy_vx)
             msg.linear.y  = float(self.joy_vy)
             msg.angular.z = float(self.joy_wz)
+            msg.linear.z  = self.height
         elif self.mode == "KEY":
             msg.linear.x  = self.key_vx
             msg.linear.y  = self.key_vy
             msg.angular.z = self.key_wz
+            msg.linear.z  = self.height
 
         self.cmd_pub.publish(msg)
         return msg
 
     # -- Status line --------------------------------------------------------
     def status_line(self, msg: Twist) -> str:
-        vx, vy, wz = msg.linear.x, msg.linear.y, msg.angular.z
+        vx, vy, wz, h = msg.linear.x, msg.linear.y, msg.angular.z, self.height
         if self.estop_active:
-            return f"\r  [\033[31mESTOP\033[0m]  vx={vx:+.2f}  vy={vy:+.2f}  wz={wz:+.2f}   "
+            return f"\r  [\033[31mESTOP\033[0m]  vx={vx:+.2f}  vy={vy:+.2f}  wz={wz:+.2f}  h={h:.2f}   "
         if self.mode == "JOY":
             sig = "LIVE" if self.joy_alive else "NO SIGNAL"
             scl = f" x{self.scale:.1f}" if abs(self.scale - 1.0) > 0.01 else ""
             return (
                 f"\r  [\033[33mJOY\033[0m|{sig}{scl}]  "
-                f"vx={vx:+.2f}  vy={vy:+.2f}  wz={wz:+.2f}   "
+                f"vx={vx:+.2f}  vy={vy:+.2f}  wz={wz:+.2f}  h={h:.2f}   "
             )
-        return f"\r  [\033[36mKEY\033[0m]  vx={vx:+.2f}  vy={vy:+.2f}  wz={wz:+.2f}   "
+        return f"\r  [\033[36mKEY\033[0m]  vx={vx:+.2f}  vy={vy:+.2f}  wz={wz:+.2f}  h={h:.2f}   "
 
 
 # ---------------------------------------------------------------------------
