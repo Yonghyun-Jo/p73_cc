@@ -89,7 +89,7 @@ install(PROGRAMS
 install(PROGRAMS
   scripts/install_joy_autostart.sh
   scripts/uninstall_joy_autostart.sh
-  scripts/walker_keyboard_teleop.sh
+  scripts/walker_teleop.sh
   DESTINATION share/${PROJECT_NAME}/scripts
 )
 

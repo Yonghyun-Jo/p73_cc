@@ -123,7 +123,7 @@ KEY_BINDINGS = {
     'w': ('vx', +KEY_STEP),  's': ('vx', -KEY_STEP),
     'a': ('vy', +KEY_STEP),  'd': ('vy', -KEY_STEP),
     'q': ('wz', +KEY_STEP),  'e': ('wz', -KEY_STEP),
-    'r': ('h', -HEIGHT_STEP),  'f': ('h', +HEIGHT_STEP),
+    'r': ('h', +HEIGHT_STEP),  'f': ('h', -HEIGHT_STEP),
 }
 
 BANNER = """
