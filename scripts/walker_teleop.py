@@ -296,17 +296,18 @@ class WalkerTeleop(Node):
 
     # -- Status line --------------------------------------------------------
     def status_line(self, msg: Twist) -> str:
+        CLR = "\033[2K\r"  # erase line + carriage return (works over SSH)
         vx, vy, wz, h = msg.linear.x, msg.linear.y, msg.angular.z, self.height
         if self.estop_active:
-            return f"\r  [\033[31mESTOP\033[0m]  vx={vx:+.2f}  vy={vy:+.2f}  wz={wz:+.2f}  h={h:.2f}   "
+            return f"{CLR}  [\033[31mESTOP\033[0m]  vx={vx:+.2f}  vy={vy:+.2f}  wz={wz:+.2f}  h={h:.2f}"
         if self.mode == "JOY":
             sig = "LIVE" if self.joy_alive else "NO SIGNAL"
             scl = f" x{self.scale:.1f}" if abs(self.scale - 1.0) > 0.01 else ""
             return (
-                f"\r  [\033[33mJOY\033[0m|{sig}{scl}]  "
-                f"vx={vx:+.2f}  vy={vy:+.2f}  wz={wz:+.2f}  h={h:.2f}   "
+                f"{CLR}  [\033[33mJOY\033[0m|{sig}{scl}]  "
+                f"vx={vx:+.2f}  vy={vy:+.2f}  wz={wz:+.2f}  h={h:.2f}"
             )
-        return f"\r  [\033[36mKEY\033[0m]  vx={vx:+.2f}  vy={vy:+.2f}  wz={wz:+.2f}  h={h:.2f}   "
+        return f"{CLR}  [\033[36mKEY\033[0m]  vx={vx:+.2f}  vy={vy:+.2f}  wz={wz:+.2f}  h={h:.2f}"
 
 
 # ---------------------------------------------------------------------------
