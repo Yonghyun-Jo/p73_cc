@@ -93,6 +93,7 @@ fi
 # --- launch joy source (local OR udp, never both) -------------------------
 if [[ -n "$JOY_DEV" ]]; then
     echo "[walker-teleop] local joystick: $JOY_DEV"
+    export JOY_REQUIRE_DEADMAN=0
     ros2 run joy joy_node --ros-args \
         -p device_name:="8BitDo Ultimate 2 Wireless Controller" \
         -p deadzone:=0.0 \
