@@ -75,16 +75,7 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-# --- launch joy_udp_receiver (for Windows joystick bridge) ----------------
-echo "[walker-teleop] starting joy_udp_receiver (UDP port 35731)..."
-python3 "$UDP_RECEIVER" --ros-args \
-    -p port:=35731 \
-    -p bind:="0.0.0.0" \
-    -p publish_rate_hz:=50.0 \
-    &>/dev/null &
-PIDS+=($!)
-
-# --- launch joy_node if local 8BitDo dongle detected ----------------------
+# --- detect local 8BitDo dongle -------------------------------------------
 JOY_DEV=""
 if [[ -e /dev/input/p73_joystick ]]; then
     JOY_DEV="/dev/input/p73_joystick"
@@ -99,6 +90,7 @@ else
     done
 fi
 
+# --- launch joy source (local OR udp, never both) -------------------------
 if [[ -n "$JOY_DEV" ]]; then
     echo "[walker-teleop] local joystick: $JOY_DEV"
     ros2 run joy joy_node --ros-args \
@@ -111,6 +103,13 @@ if [[ -n "$JOY_DEV" ]]; then
     PIDS+=($!)
 else
     echo "[walker-teleop] no local dongle → UDP/Windows mode"
+    echo "[walker-teleop] starting joy_udp_receiver (UDP port 35731)..."
+    python3 "$UDP_RECEIVER" --ros-args \
+        -p port:=35731 \
+        -p bind:="0.0.0.0" \
+        -p publish_rate_hz:=50.0 \
+        &>/dev/null &
+    PIDS+=($!)
     export JOY_AXIS_WZ=2
     export JOY_AXIS_HEIGHT=3
     export JOY_INVERT_VX=1
