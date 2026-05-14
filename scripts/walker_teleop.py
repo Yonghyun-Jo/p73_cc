@@ -83,9 +83,11 @@ class JoyConfig:
     axis_vx:    int  = int(os.environ.get("JOY_AXIS_VX", "1"))
     axis_vy:    int  = int(os.environ.get("JOY_AXIS_VY", "0"))
     axis_wz:    int  = int(os.environ.get("JOY_AXIS_WZ", "3"))
+    axis_height: int = int(os.environ.get("JOY_AXIS_HEIGHT", "4"))  # right stick Y
     invert_vx:  bool = os.environ.get("JOY_INVERT_VX", "0") == "1"
     invert_vy:  bool = os.environ.get("JOY_INVERT_VY", "0") == "1"
     invert_wz:  bool = os.environ.get("JOY_INVERT_WZ", "0") == "1"
+    invert_height: bool = os.environ.get("JOY_INVERT_HEIGHT", "0") == "1"
     max_vx:     float = 1.0
     max_vy:     float = 0.5
     max_wz:     float = 1.0
@@ -93,13 +95,14 @@ class JoyConfig:
     expo:       float = 0.30
     timeout_s:  float = 0.5
     require_deadman: bool = os.environ.get("JOY_REQUIRE_DEADMAN", "1") == "1"
+    height_rate: float = 0.5  # m/s at full stick deflection
 
     # Buttons (8BitDo Ultimate 2, XInput)
     BTN_PUSH      = 0   # A
     BTN_VIZ       = 2   # X
     BTN_RESET     = 3   # Y  → also switches to KEY mode
-    BTN_CROUCH    = 4   # LB → lower height
-    BTN_STAND     = 5   # RB → raise height
+    BTN_DEADMAN   = 4   # LB
+    BTN_SCALE_UP  = 5   # RB
     BTN_SCALE_DN  = 6   # Back/Select
     BTN_ESTOP     = 7   # Start
 
@@ -129,9 +132,8 @@ KEY_BINDINGS = {
 BANNER = """
 === Walker Teleop (Crouch) ===
   [KEY] w/s:fwd/back  a/d:left/right  q/e:rotate
-        r:crouch  f:stand  space:stop
-  [JOY] left stick:vx,vy  right stick:wz
-        LB:crouch  RB:stand
+        r:height up  f:height down  space:stop
+  [JOY] left stick:vx,vy  right stick X:wz  Y:height
   Mode: j→JOY  k→KEY  Y button→KEY    Ctrl+C: quit
 ===============================
 """
@@ -174,6 +176,7 @@ class WalkerTeleop(Node):
         self.joy_vx = 0.0
         self.joy_vy = 0.0
         self.joy_wz = 0.0
+        self.joy_height_rate = 0.0  # right stick Y → height change rate
         self.joy_alive = False
         self.deadman_held = not self.cfg.require_deadman
         self.estop_active = False
@@ -214,8 +217,13 @@ class WalkerTeleop(Node):
         self.joy_vy = proc_vy * cfg.max_vy * self.scale
         self.joy_wz = proc_wz * cfg.max_wz * self.scale
 
-        # No deadman in crouch branch — always active
-        self.deadman_held = True
+        # Right stick Y → height change rate
+        raw_h = ax(cfg.axis_height) * (-1.0 if cfg.invert_height else 1.0)
+        proc_h = apply_expo(apply_deadzone(raw_h, cfg.deadzone), cfg.expo)
+        self.joy_height_rate = proc_h * cfg.height_rate  # m/s
+
+        # Deadman
+        self.deadman_held = (bt(cfg.BTN_DEADMAN, default=1) == 1) or (not cfg.require_deadman)
 
         # Buttons (rising edge only)
         if pressed(cfg.BTN_RESET):       # Y → KEY mode + reset scale
@@ -228,11 +236,8 @@ class WalkerTeleop(Node):
         if pressed(cfg.BTN_ESTOP):
             self.estop_active = not self.estop_active
 
-        if pressed(cfg.BTN_CROUCH):      # LB → lower height
-            self.height = clamp(self.height - HEIGHT_STEP, HEIGHT_MIN, HEIGHT_MAX)
-
-        if pressed(cfg.BTN_STAND):       # RB → raise height
-            self.height = clamp(self.height + HEIGHT_STEP, HEIGHT_MIN, HEIGHT_MAX)
+        if pressed(cfg.BTN_SCALE_UP):
+            self.scale = min(cfg.SCALE_MAX, self.scale + cfg.SCALE_STEP)
 
         if pressed(cfg.BTN_SCALE_DN):
             self.scale = max(cfg.SCALE_MIN, self.scale - cfg.SCALE_STEP)
@@ -277,6 +282,13 @@ class WalkerTeleop(Node):
         )
 
         msg = Twist()
+
+        # Update height from right stick Y (rate control)
+        if self.mode == "JOY" and self.joy_alive and abs(self.joy_height_rate) > 0.001:
+            self.height = clamp(
+                self.height + self.joy_height_rate / PUB_HZ,
+                HEIGHT_MIN, HEIGHT_MAX,
+            )
 
         if self.estop_active:
             msg.linear.z = self.height  # keep height even in estop

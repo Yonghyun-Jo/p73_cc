@@ -40,7 +40,10 @@ if [[ "$ROS_FOUND" -eq 0 ]]; then
     exit 1
 fi
 # shellcheck disable=SC1091
-source "${HOME}/ros2_ws/install/setup.bash"
+# Derive workspace root from script location (works as root or normal user)
+# SCRIPT_DIR = .../ros2_ws/src/p73_cc/scripts → WS = .../ros2_ws
+WS_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
+source "${WS_ROOT}/install/setup.bash"
 
 # --- stop joy systemd services (they must not run independently) -----------
 for svc in "$SERVICE_UDP" "$SERVICE_LOCAL"; do
@@ -109,9 +112,11 @@ if [[ -n "$JOY_DEV" ]]; then
 else
     echo "[walker-teleop] no local dongle → UDP/Windows mode"
     export JOY_AXIS_WZ=2
+    export JOY_AXIS_HEIGHT=3
     export JOY_INVERT_VX=1
     export JOY_INVERT_VY=1
     export JOY_INVERT_WZ=1
+    export JOY_INVERT_HEIGHT=1
     export JOY_REQUIRE_DEADMAN=0
 fi
 
