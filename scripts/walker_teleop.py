@@ -120,6 +120,12 @@ KEY_MAX_WZ = 0.6
 HEIGHT_STEP = 0.05
 HEIGHT_MIN = 0.55
 HEIGHT_MAX = 0.89
+ROLL_STEP = 0.05
+ROLL_MIN = -0.25
+ROLL_MAX = 0.25
+PITCH_STEP = 0.1
+PITCH_MIN = -0.5
+PITCH_MAX = 0.5
 PUB_HZ    = 50.0
 
 KEY_BINDINGS = {
@@ -127,15 +133,17 @@ KEY_BINDINGS = {
     'a': ('vy', +KEY_STEP),  'd': ('vy', -KEY_STEP),
     'q': ('wz', +KEY_STEP),  'e': ('wz', -KEY_STEP),
     'r': ('h', +HEIGHT_STEP),  'f': ('h', -HEIGHT_STEP),
+    't': ('roll', +ROLL_STEP),  'g': ('roll', -ROLL_STEP),
+    'y': ('pitch', +PITCH_STEP),  'h': ('pitch', -PITCH_STEP),
 }
 
 BANNER = """
-=== Walker Teleop (Crouch) ===
+=== Walker Teleop (Crouch + Pose) ===
   [KEY] w/s:fwd/back  a/d:left/right  q/e:rotate
-        r:height up  f:height down  space:stop
+        r/f:height  t/g:roll  y/h:pitch  space:stop
   [JOY] left stick:vx,vy  right stick X:wz  Y:height
   Mode: j→JOY  k→KEY  Y button→KEY    Ctrl+C: quit
-===============================
+======================================
 """
 
 
@@ -169,8 +177,10 @@ class WalkerTeleop(Node):
         self.key_vy = 0.0
         self.key_wz = 0.0
 
-        # Height command (shared across modes)
+        # Pose commands (shared across modes)
         self.height = HEIGHT_MAX  # default standing
+        self.roll = 0.0
+        self.pitch = 0.0
 
         # Joystick
         self.joy_vx = 0.0
@@ -230,6 +240,8 @@ class WalkerTeleop(Node):
             self.mode = "KEY"
             self.key_vx = self.key_vy = self.key_wz = 0.0
             self.height = HEIGHT_MAX
+            self.roll = 0.0
+            self.pitch = 0.0
             self.scale = 1.0
             self.estop_active = False
 
@@ -262,10 +274,16 @@ class WalkerTeleop(Node):
             if key == ' ':
                 self.key_vx = self.key_vy = self.key_wz = 0.0
                 self.height = HEIGHT_MAX
+                self.roll = 0.0
+                self.pitch = 0.0
             elif key.lower() in KEY_BINDINGS:
                 axis, delta = KEY_BINDINGS[key.lower()]
                 if axis == 'h':
                     self.height = clamp(self.height + delta, HEIGHT_MIN, HEIGHT_MAX)
+                elif axis == 'roll':
+                    self.roll = clamp(self.roll + delta, ROLL_MIN, ROLL_MAX)
+                elif axis == 'pitch':
+                    self.pitch = clamp(self.pitch + delta, PITCH_MIN, PITCH_MAX)
                 elif axis == 'vx':
                     self.key_vx = clamp(self.key_vx + delta, -KEY_MAX_V, KEY_MAX_V)
                 elif axis == 'vy':
@@ -291,17 +309,23 @@ class WalkerTeleop(Node):
             )
 
         if self.estop_active:
-            msg.linear.z = self.height  # keep height even in estop
+            msg.linear.z  = self.height  # keep height even in estop
+            msg.angular.x = self.roll
+            msg.angular.y = self.pitch
         elif self.mode == "JOY" and self.joy_alive and self.deadman_held:
             msg.linear.x  = float(self.joy_vx)
             msg.linear.y  = float(self.joy_vy)
             msg.angular.z = float(self.joy_wz)
             msg.linear.z  = self.height
+            msg.angular.x = self.roll
+            msg.angular.y = self.pitch
         elif self.mode == "KEY":
             msg.linear.x  = self.key_vx
             msg.linear.y  = self.key_vy
             msg.angular.z = self.key_wz
             msg.linear.z  = self.height
+            msg.angular.x = self.roll
+            msg.angular.y = self.pitch
 
         self.cmd_pub.publish(msg)
         return msg
@@ -310,7 +334,8 @@ class WalkerTeleop(Node):
     def status_line(self, msg: Twist) -> str:
         CLR = "\033[2K\r"
         vx, vy, wz, h = msg.linear.x, msg.linear.y, msg.angular.z, self.height
-        vals = f"vx={vx:+.2f}  vy={vy:+.2f}  wz={wz:+.2f}  h={h:.2f}"
+        r, p = self.roll, self.pitch
+        vals = f"vx={vx:+.2f}  vy={vy:+.2f}  wz={wz:+.2f}  h={h:.2f}  r={r:+.2f}  p={p:+.2f}"
         if self.estop_active:
             return f"{CLR}  \033[31m[ESTOP]\033[0m  {vals}"
         if self.mode == "JOY":

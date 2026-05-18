@@ -57,10 +57,11 @@ public:
     //////////////////////// Network Dimensions ////////////////////////
     // From rough_env_cfg.py PolicyCfg:
     //   base_ang_vel(3) + projected_gravity(3) + velocity_commands(3)
+    //   + pose_command(4: height, roll, pitch, yaw)
     //   + gait_phase_sin(1) + gait_phase_cos(1)
-    //   + motor_joint_pos(12) + motor_joint_vel(12) + last_action(12) = 47
+    //   + motor_joint_pos(12) + motor_joint_vel(12) + last_action(12) = 51
     static const int num_action = 12;         // lower body RL-controlled
-    static const int num_single_obs = 48;     // 47 + height_command(1)
+    static const int num_single_obs = 51;     // 47 + pose_command(4)
 
     int history_length_ = 10;     // overwritten from ONNX shape
     int policy_obs_dim_ = num_single_obs * 5;
@@ -127,13 +128,16 @@ public:
     int gait_step_counter_ = 0;
     int gait_period_steps_ = 70;  // from rough_env_cfg __post_init__
 
-    // Velocity + height command (updated by ROS2 subscriber)
+    // Velocity + pose command (updated by ROS2 subscriber)
     std::mutex vel_mutex_;
     double target_vel_x_ = 0.0;
     double target_vel_y_ = 0.0;
     double target_vel_yaw_ = 0.0;
-    double target_height_ = 0.89;   // height command from Twist.linear.z
-    double cmd_zero_max_ = 1.0e-3;
+    double target_height_ = 0.89;   // pose_command[0]: height (Twist.linear.z)
+    double target_roll_ = 0.0;      // pose_command[1]: roll   (Twist.angular.x)
+    double target_pitch_ = 0.0;     // pose_command[2]: pitch  (Twist.angular.y)
+    double target_yaw_pose_ = 0.0;  // pose_command[3]: yaw    (always 0.0, not trained)
+    double cmd_zero_max_ = 0.01;    // match training gait_phase cmd_zero_max
 
     double value_ = 0.0;
 

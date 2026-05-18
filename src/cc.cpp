@@ -162,7 +162,7 @@ void CustomController::loadOnnX()
         if (s.size() == 2 && s[1] > 0) {
             policy_obs_dim_ = static_cast<int>(s[1]);
             if (policy_obs_dim_ % num_single_obs != 0)
-                throw std::runtime_error("[p73_cc] policy_obs_history dim must be divisible by 47.");
+                throw std::runtime_error("[p73_cc] policy_obs_history dim must be divisible by 51.");
             history_length_ = policy_obs_dim_ / num_single_obs;
             cout << "[p73_cc] Inferred policy_obs_dim=" << policy_obs_dim_
                  << " (history_length=" << history_length_ << ")" << endl;
@@ -234,13 +234,17 @@ void CustomController::processObservation()
     VectorXd q_vel = q_vel_noise_.head<12>();
     VectorXd q_pos_rel = q_pos - q_default_p73_.head<12>();
 
-    double local_vel_x, local_vel_y, local_vel_yaw, local_height;
+    double local_vel_x, local_vel_y, local_vel_yaw;
+    double local_height, local_roll, local_pitch, local_yaw_pose;
     {
         std::lock_guard<std::mutex> lock(vel_mutex_);
         local_vel_x = target_vel_x_;
         local_vel_y = target_vel_y_;
         local_vel_yaw = target_vel_yaw_;
         local_height = target_height_;
+        local_roll = target_roll_;
+        local_pitch = target_pitch_;
+        local_yaw_pose = target_yaw_pose_;
     }
 
 
@@ -269,6 +273,9 @@ void CustomController::processObservation()
     policy_frame_[idx++] = static_cast<float>(local_vel_y);
     policy_frame_[idx++] = static_cast<float>(local_vel_yaw);
     policy_frame_[idx++] = static_cast<float>(local_height);
+    policy_frame_[idx++] = static_cast<float>(local_roll);
+    policy_frame_[idx++] = static_cast<float>(local_pitch);
+    policy_frame_[idx++] = static_cast<float>(local_yaw_pose);
     policy_frame_[idx++] = static_cast<float>(gait_sin);
     policy_frame_[idx++] = static_cast<float>(gait_cos);
     for (int i = 0; i < 12; i++)
@@ -404,8 +411,8 @@ void CustomController::computeFast()
         // Dump first N policy steps to JSONL + console
         constexpr int dump_max_steps = 25;
         if (policy_step_count <= dump_max_steps) {
-            constexpr int dims[] = {3, 3, 3, 1, 1, 1, 12, 12, 12};
-            const char* term_names[] = {"ang_vel", "gravity", "cmd", "height_cmd", "gait_sin", "gait_cos",
+            constexpr int dims[] = {3, 3, 3, 4, 1, 1, 12, 12, 12};
+            const char* term_names[] = {"ang_vel", "gravity", "cmd", "pose_cmd", "gait_sin", "gait_cos",
                                         "joint_pos", "joint_vel", "last_action"};
             int H = history_length_;
 
@@ -603,7 +610,7 @@ void CustomController::computeFast()
         for (int i = 0; i < 12; i++) log_file << ",q_rel_" << i;
         // Joint vel measured (13 DOF) — analog of joint_velocity_log
         for (int i = 0; i < MODEL_DOF; i++) log_file << ",qdot_" << i;
-        // Policy obs frame (47D, what actually goes into network)
+        // Policy obs frame (51D, what actually goes into network)
         for (int i = 0; i < num_single_obs; i++) log_file << ",obs_" << i;
         // RL actions (12)
         for (int i = 0; i < num_action; i++) log_file << ",action_" << i;
@@ -736,6 +743,9 @@ void CustomController::velCmdCallback(const geometry_msgs::msg::Twist::SharedPtr
     // Height command via Twist.linear.z (0 means "keep current")
     if (std::abs(msg->linear.z) > 1e-6)
         target_height_ = msg->linear.z;
+    // Pose commands: roll via angular.x, pitch via angular.y
+    target_roll_ = msg->angular.x;
+    target_pitch_ = msg->angular.y;
 }
 
 void CustomController::startVelSubscriber()
