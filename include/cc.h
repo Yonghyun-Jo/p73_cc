@@ -117,14 +117,14 @@ public:
     // q_target = q_default + clip(rl_action, ±2.0) * action_scales_[i]
     double action_scales_[num_action] = {
         0.319,  // L_HipRoll
-        0.626,  // L_HipPitch
+        0.681,  // L_HipPitch
         0.429,  // L_HipYaw
-        1.141,  // L_Knee
+        1.147,  // L_Knee
         0.484,  // L_AnklePitch
         0.231,  // L_AnkleRoll
-        0.285,  // R_HipRoll
+        0.319,  // R_HipRoll
         0.681,  // R_HipPitch
-        0.644,  // R_HipYaw
+        0.429,  // R_HipYaw
         1.147,  // R_Knee
         0.484,  // R_AnklePitch
         0.231,  // R_AnkleRoll
