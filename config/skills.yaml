@@ -27,13 +27,6 @@ skills:
         pitch: 0.0
       - t: 1.0
         pitch: 0.4
-        height: 0.72
-      - t: 2.0
-        pitch: 0.4
-        height: 0.72
-      - t: 3.0
-        pitch: 0.0
-        height: 0.89
     loop: false
 
   dance:
@@ -45,21 +38,24 @@ skills:
         vx: 0.0
         vy: 0.0
         wz: 0.0
-        height: 0.65
-        roll: 0.25
+        height: 0.89
+        roll: 0.0
         pitch: 0.0
       - t: 0.5
-        roll: -0.25
-        height: 0.89
+        height: 0.65
+        roll: 0.0
       - t: 1.0
-        roll: 0.25
-        height: 0.65
-      - t: 1.5
-        roll: -0.25
         height: 0.89
-      - t: 2.0
         roll: 0.25
+      - t: 1.5
         height: 0.65
+        roll: 0.0
+      - t: 2.0
+        height: 0.89
+        roll: -0.25
+      - t: 2.5
+        height: 0.65
+        roll: 0.0
     loop: true
 
   crouch:
@@ -77,12 +73,6 @@ skills:
       - t: 1.0
         height: 0.58
         pitch: 0.3
-      - t: 3.0
-        height: 0.58
-        pitch: 0.3
-      - t: 4.0
-        height: 0.89
-        pitch: 0.0
     loop: false
 
   limbo:
@@ -100,10 +90,4 @@ skills:
       - t: 1.5
         height: 0.60
         pitch: -0.45
-      - t: 4.0
-        height: 0.60
-        pitch: -0.45
-      - t: 5.5
-        height: 0.89
-        pitch: 0.0
     loop: false

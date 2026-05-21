@@ -27,6 +27,7 @@ Usage:
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 import sys
 import select
@@ -150,7 +151,7 @@ BANNER = """
   [JOY] left stick:vx,vy  right stick X:wz  Y:height
         D-Pad up/dn:pitch  D-Pad L/R:roll
   [SKILL] 1:bow  2:dance  3:crouch  4:limbo
-          3,4 allow walking while active
+          press again to return / 3,4 walk-through
   Mode: j→JOY  k→KEY  Y button→KEY    Ctrl+C: quit
 =============================================
 """
@@ -162,18 +163,36 @@ BANNER = """
 SKILL_FIELDS = ('vx', 'vy', 'wz', 'height', 'roll', 'pitch')
 
 
+RETURN_DURATION = 1.0  # seconds to smoothly return to default pose
+
+# Default pose values (matching HEIGHT_MAX etc.)
+DEFAULT_CMD = {'vx': 0.0, 'vy': 0.0, 'wz': 0.0,
+               'height': HEIGHT_MAX, 'roll': 0.0, 'pitch': 0.0}
+
+
 class SkillPlayer:
-    """Plays back time-keyed command profiles loaded from YAML."""
+    """Toggle-based skill player: press to activate, press again to return.
+
+    States:
+      inactive  → not playing
+      playing   → running keyframes (enter motion or loop)
+      holding   → keyframes done, holding final pose (non-loop only)
+      returning → smoothly interpolating back to default pose
+    """
 
     def __init__(self, yaml_path: str | None = None):
         self.skills: dict = {}
         self.active_name: str | None = None
+        self._state: str = 'inactive'  # inactive / playing / holding / returning
         self._keyframes: list[dict] = []
         self._loop: bool = False
         self._passthrough_vel: bool = False
         self._start_time: float = 0.0
         self._duration: float = 0.0
-        self._last_cmd: dict = {}
+        self._last_cmd: dict = dict(DEFAULT_CMD)
+        # return transition
+        self._return_from: dict = {}
+        self._return_start: float = 0.0
         if yaml_path and os.path.isfile(yaml_path):
             self._load(yaml_path)
 
@@ -181,9 +200,6 @@ class SkillPlayer:
         with open(path) as f:
             data = yaml.safe_load(f)
         self.skills = data.get('skills', {})
-
-    def list_skills(self) -> dict:
-        return self.skills
 
     def start(self, name: str):
         if name not in self.skills:
@@ -197,36 +213,62 @@ class SkillPlayer:
         self._duration = self._keyframes[-1].get('t', 0.0)
         self._start_time = time.monotonic()
         self._last_cmd = {k: self._keyframes[0].get(k, 0.0) for k in SKILL_FIELDS}
+        self._state = 'playing'
         self.active_name = name
+
+    def toggle(self, name: str):
+        """Press once to activate, press again to return to default."""
+        if self.active_name == name and self._state in ('playing', 'holding'):
+            self._begin_return()
+        elif self.active_name == name and self._state == 'returning':
+            pass  # already returning, ignore
+        else:
+            # different skill or inactive → start new
+            self.start(name)
+
+    def _begin_return(self):
+        self._return_from = dict(self._last_cmd)
+        self._return_start = time.monotonic()
+        self._state = 'returning'
 
     @property
     def passthrough_velocity(self) -> bool:
         return self._passthrough_vel if self.is_active() else False
 
     def cancel(self) -> dict:
-        """Cancel and return the last interpolated command."""
+        """Hard cancel — return last cmd without smooth return."""
         cmd = dict(self._last_cmd)
         self.active_name = None
+        self._state = 'inactive'
         self._keyframes = []
         return cmd
 
     def is_active(self) -> bool:
-        return self.active_name is not None
+        return self._state != 'inactive'
 
     def update(self) -> dict | None:
-        if not self.is_active():
+        if self._state == 'inactive':
             return None
+
+        if self._state == 'returning':
+            return self._update_return()
+
+        if self._state == 'holding':
+            return dict(self._last_cmd)
+
+        # state == 'playing'
         elapsed = time.monotonic() - self._start_time
         if self._loop and self._duration > 0:
             elapsed = elapsed % self._duration
         elif elapsed >= self._duration:
+            # finished keyframes → hold
             cmd = {k: self._keyframes[-1].get(k, self._last_cmd.get(k, 0.0))
                    for k in SKILL_FIELDS}
             self._last_cmd = cmd
-            self.active_name = None
+            self._state = 'holding'
             return cmd
 
-        # find surrounding keyframes
+        # interpolate keyframes
         kf0 = self._keyframes[0]
         kf1 = self._keyframes[1]
         for i in range(len(self._keyframes) - 1):
@@ -235,19 +277,31 @@ class SkillPlayer:
                 kf1 = self._keyframes[i + 1]
                 break
 
-        # lerp
         dt = kf1['t'] - kf0['t']
         alpha = (elapsed - kf0['t']) / dt if dt > 0 else 1.0
         cmd = {}
         for k in SKILL_FIELDS:
             v0 = kf0.get(k, self._last_cmd.get(k, 0.0))
-            v1 = kf1.get(k, v0)  # if not specified in kf1, hold previous
+            v1 = kf1.get(k, v0)
             cmd[k] = v0 + (v1 - v0) * alpha
         self._last_cmd = cmd
         return cmd
 
+    def _update_return(self) -> dict:
+        elapsed = time.monotonic() - self._return_start
+        alpha = min(elapsed / RETURN_DURATION, 1.0)
+        cmd = {}
+        for k in SKILL_FIELDS:
+            v0 = self._return_from.get(k, 0.0)
+            v1 = DEFAULT_CMD[k]
+            cmd[k] = v0 + (v1 - v0) * alpha
+        self._last_cmd = cmd
+        if alpha >= 1.0:
+            self.active_name = None
+            self._state = 'inactive'
+        return cmd
+
     def skill_name_for_key(self, key: str) -> str | None:
-        """Return skill name triggered by keyboard key (e.g. '1' → first skill with button=keyboard_1)."""
         target = f"keyboard_{key}"
         for name, skill in self.skills.items():
             if skill.get('button') == target:
@@ -397,24 +451,14 @@ class WalkerTeleop(Node):
         self._prev_dpad_x = dpad_x
         self._prev_dpad_y = dpad_y
 
-        # Skill trigger (joystick button — check all buttons not already handled)
+        # Skill trigger (joystick button — toggle on/off)
         for bi in range(len(msg.buttons)):
             cur = bt(bi)
             prev = self._prev_btn.get(bi, 0)
             if cur == 1 and prev == 0:
                 skill_name = self.skill.skill_name_for_joy_button(bi)
                 if skill_name:
-                    self.skill.start(skill_name)
-
-        # Cancel skill on stick input (only if skill doesn't allow velocity passthrough)
-        if self.skill.is_active() and not self.skill.passthrough_velocity:
-            any_stick = (abs(proc_vx) > 0.01 or abs(proc_vy) > 0.01
-                         or abs(proc_wz) > 0.01)
-            if any_stick:
-                snap = self.skill.cancel()
-                self.height = snap.get('height', self.height)
-                self.roll = snap.get('roll', self.roll)
-                self.pitch = snap.get('pitch', self.pitch)
+                    self.skill.toggle(skill_name)
 
     # -- Keyboard input -----------------------------------------------------
     def handle_key(self, key: str) -> bool:
@@ -424,39 +468,23 @@ class WalkerTeleop(Node):
         if key == '':
             return True
 
-        # Skill active: handle cancel or passthrough
-        if self.skill.is_active():
-            # Number key → switch to different skill
-            skill_name = self.skill.skill_name_for_key(key)
-            if skill_name:
-                self.skill.cancel()
-                self.skill.start(skill_name)
-                return True
-            # Passthrough velocity: let velocity keys work, others cancel
-            if self.skill.passthrough_velocity:
-                vel_keys = {'w', 's', 'a', 'd', 'q', 'e', ' '}
-                if key.lower() in vel_keys:
-                    # process as normal KEY input (fall through below)
-                    pass
-                else:
-                    snap = self.skill.cancel()
-                    self.height = snap.get('height', self.height)
-                    self.roll = snap.get('roll', self.roll)
-                    self.pitch = snap.get('pitch', self.pitch)
-                    return True
-            else:
-                snap = self.skill.cancel()
-                self.height = snap.get('height', self.height)
-                self.roll = snap.get('roll', self.roll)
-                self.pitch = snap.get('pitch', self.pitch)
-                return True
-
-        # Skill trigger by number key
+        # Skill toggle by number key (works whether active or not)
         if key in '0123456789':
             skill_name = self.skill.skill_name_for_key(key)
             if skill_name:
-                self.skill.start(skill_name)
+                self.skill.toggle(skill_name)
                 return True
+
+        # Skill active: velocity keys pass through for passthrough skills
+        if self.skill.is_active():
+            if self.skill.passthrough_velocity:
+                vel_keys = {'w', 's', 'a', 'd', 'q', 'e', ' '}
+                if key.lower() in vel_keys:
+                    pass  # fall through to normal key handling
+                else:
+                    return True  # ignore non-velocity keys
+            else:
+                return True  # ignore all keys when non-passthrough skill active
 
         if key == 'j':
             self.mode = "JOY"
@@ -553,19 +581,36 @@ class WalkerTeleop(Node):
 
     # -- Status line --------------------------------------------------------
     def status_line(self, msg: Twist) -> str:
-        CLR = "\033[2K\r"
         vx, vy, wz, h = msg.linear.x, msg.linear.y, msg.angular.z, self.height
         r, p = self.roll, self.pitch
-        vals = f"vx={vx:+.2f}  vy={vy:+.2f}  wz={wz:+.2f}  h={h:.2f}  r={r:+.2f}  p={p:+.2f}"
+        vals = f"vx={vx:+.2f} vy={vy:+.2f} wz={wz:+.2f} h={h:.2f} r={r:+.2f} p={p:+.2f}"
         if self.skill.is_active():
-            return f"{CLR}  \033[35m[SKILL:{self.skill.active_name}]\033[0m  {vals}"
-        if self.estop_active:
-            return f"{CLR}  \033[31m[ESTOP]\033[0m  {vals}"
-        if self.mode == "JOY":
+            state = self.skill._state
+            tag = self.skill.active_name
+            if state == 'returning':
+                line = f"  \033[33m[{tag}<<]\033[0m {vals}"
+            else:
+                line = f"  \033[35m[{tag}]\033[0m {vals}"
+        elif self.estop_active:
+            line = f"  \033[31m[ESTOP]\033[0m {vals}"
+        elif self.mode == "JOY":
             dot = "\033[32m●\033[0m" if self.joy_alive else "\033[31m○\033[0m"
-            scl = f"  x{self.scale:.1f}" if abs(self.scale - 1.0) > 0.01 else ""
-            return f"{CLR}  \033[33m[JOY]\033[0m {dot}  {vals}{scl}"
-        return f"{CLR}  \033[36m[KEY]\033[0m     {vals}"
+            scl = f" x{self.scale:.1f}" if abs(self.scale - 1.0) > 0.01 else ""
+            line = f"  \033[33m[JOY]\033[0m{dot} {vals}{scl}"
+        else:
+            line = f"  \033[36m[KEY]\033[0m {vals}"
+        # Truncate to terminal width to prevent line wrapping
+        try:
+            cols = os.get_terminal_size().columns
+        except OSError:
+            cols = 80
+        # ANSI escape codes don't take visual space — strip them to measure
+        visible_len = len(re.sub(r'\033\[[0-9;]*m', '', line))
+        if visible_len > cols - 1:
+            # trim visible chars from the end
+            over = visible_len - cols + 1
+            line = line[:len(line) - over]
+        return f"\033[2K\r{line}"
 
 
 # ---------------------------------------------------------------------------

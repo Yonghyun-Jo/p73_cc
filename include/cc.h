@@ -76,7 +76,7 @@ public:
 
     //////////////////////// processNoise (TOCABI sim2real pattern) ////////////////////////
     // is_on_robot_: true=real robot (direct sensor), false=sim (noise + numerical diff)
-    bool is_on_robot_ = true;
+    bool is_on_robot_ = false;
 
     // Joint state used by BOTH obs and PD (matching TOCABI)
     Matrix<double, MODEL_DOF, 1> q_noise_;       // joint position (noised in sim, direct on robot)
