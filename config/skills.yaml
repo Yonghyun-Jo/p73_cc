@@ -1,0 +1,109 @@
+# Skill profiles — keyframe-based command sequences
+#
+# Each skill defines a series of keyframes with time (t) and command values.
+# Commands: vx, vy, wz, height, roll, pitch
+# Unspecified fields hold the previous keyframe's value (default 0.0).
+# Keyframes are linearly interpolated at 50Hz.
+#
+# Triggers:
+#   button: keyboard_<N>   → keyboard number key
+#   joy_button: <N>        → joystick button index (8BitDo XInput)
+#
+# passthrough_velocity: true  → user can walk while skill controls pose
+# loop: true                  → repeats until cancelled
+
+skills:
+  bow:
+    button: keyboard_1
+    joy_button: null
+    passthrough_velocity: false
+    keyframes:
+      - t: 0.0
+        vx: 0.0
+        vy: 0.0
+        wz: 0.0
+        height: 0.89
+        roll: 0.0
+        pitch: 0.0
+      - t: 1.0
+        pitch: 0.4
+        height: 0.72
+      - t: 2.0
+        pitch: 0.4
+        height: 0.72
+      - t: 3.0
+        pitch: 0.0
+        height: 0.89
+    loop: false
+
+  dance:
+    button: keyboard_2
+    joy_button: null
+    passthrough_velocity: false
+    keyframes:
+      - t: 0.0
+        vx: 0.0
+        vy: 0.0
+        wz: 0.0
+        height: 0.65
+        roll: 0.25
+        pitch: 0.0
+      - t: 0.5
+        roll: -0.25
+        height: 0.89
+      - t: 1.0
+        roll: 0.25
+        height: 0.65
+      - t: 1.5
+        roll: -0.25
+        height: 0.89
+      - t: 2.0
+        roll: 0.25
+        height: 0.65
+    loop: true
+
+  crouch:
+    button: keyboard_3
+    joy_button: null
+    passthrough_velocity: true
+    keyframes:
+      - t: 0.0
+        vx: 0.0
+        vy: 0.0
+        wz: 0.0
+        height: 0.89
+        roll: 0.0
+        pitch: 0.0
+      - t: 1.0
+        height: 0.58
+        pitch: 0.3
+      - t: 3.0
+        height: 0.58
+        pitch: 0.3
+      - t: 4.0
+        height: 0.89
+        pitch: 0.0
+    loop: false
+
+  limbo:
+    button: keyboard_4
+    joy_button: null
+    passthrough_velocity: true
+    keyframes:
+      - t: 0.0
+        vx: 0.0
+        vy: 0.0
+        wz: 0.0
+        height: 0.89
+        roll: 0.0
+        pitch: 0.0
+      - t: 1.5
+        height: 0.60
+        pitch: -0.45
+      - t: 4.0
+        height: 0.60
+        pitch: -0.45
+      - t: 5.5
+        height: 0.89
+        pitch: 0.0
+    loop: false
