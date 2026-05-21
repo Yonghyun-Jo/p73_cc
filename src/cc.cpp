@@ -563,6 +563,8 @@ void CustomController::computeFast()
         for (int i = 0; i < MODEL_DOF; i++) log_file << ",tau_meas_motor_" << i;
         // Linear velocity world frame (for debug)
         log_file << ",lin_vel_wx,lin_vel_wy,lin_vel_wz";
+        // measured: rd_.motor_voltage_ from ECAT (motor side, real robot only)
+        for (int i = 0; i < MODEL_DOF; i++) log_file << ",motor_voltage_" << i;
         // Value function output
         log_file << ",value";
         log_file << "\n";
@@ -615,6 +617,8 @@ void CustomController::computeFast()
         for (int i = 0; i < MODEL_DOF; i++) log_file << "," << rd_.q_torque_motor_(i);
         // Lin vel world
         log_file << "," << lin_vel_w_log(0) << "," << lin_vel_w_log(1) << "," << lin_vel_w_log(2);
+        // Motor voltage
+        for (int i = 0; i < MODEL_DOF; i++) log_file << "," << rd_.motor_voltage_(i);
         // Value
         log_file << "," << value_;
         log_file << "\n";
