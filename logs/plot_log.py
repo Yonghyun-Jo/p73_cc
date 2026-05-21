@@ -414,6 +414,28 @@ def plot_actuator_net_inputs(t, d, out):
     return path
 
 
+
+def plot_motor_voltage(t, d, out):
+    cols = [f"motor_voltage_{i}" for i in range(13) if f"motor_voltage_{i}" in d]
+    if not cols:
+        return None
+    # Skip if all zeros (simulation / no real robot data)
+    has_data = any(np.any(np.abs(d[c]) > 1e-9) for c in cols)
+    if not has_data:
+        return None
+    n = len(cols); ncols = 3; nrows = math.ceil(n / ncols)
+    fig, axes = plt.subplots(nrows, ncols, figsize=(18, 3.5 * nrows), sharex=True)
+    axes = np.array(axes).reshape(-1); fig.suptitle("Motor Voltage (ECAT link_voltage)", fontsize=14)
+    for i, col in enumerate(cols):
+        axes[i].plot(t, d[col], lw=0.8, color="tab:purple")
+        axes[i].set_title(joint_label("voltage", i)); axes[i].grid(True, alpha=0.3)
+        axes[i].set_ylabel("V"); axes[i].set_xlabel("time [s]")
+    for i in range(n, len(axes)):
+        axes[i].axis("off")
+    fig.tight_layout(); path = out / "06e_motor_voltage.png"; fig.savefig(path, dpi=150); plt.close(fig)
+    return path
+
+
 def plot_obs_frame(t, d, out):
     obs_cols = [f"obs_{i}" for i in range(47) if f"obs_{i}" in d]
     if not obs_cols:
@@ -832,6 +854,7 @@ def plot_csv(csv_path: Path, show: bool = False) -> Path:
         lambda: plot_torque_des_vs_meas_joint(t, data, out_dir),
         lambda: plot_torque_des_vs_meas_motor(t, data, out_dir),
         lambda: plot_actuator_net_inputs(t, data, out_dir),
+        lambda: plot_motor_voltage(t, data, out_dir),
         lambda: plot_obs_frame(t, data, out_dir),
     ]:
         p = fn()
