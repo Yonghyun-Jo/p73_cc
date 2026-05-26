@@ -219,6 +219,8 @@ class MotionGuiWindow(QWidget):
         self.motion: MotionData | None = None
         self.playing = False
         self.current_frame = 0
+        self.time_acc = 0.0
+        self.policy_dt = 0.02  # 50Hz, matches IsaacLab decimation=4 * sim_dt=0.005
         self._slider_pressed = False
 
         self.setWindowTitle("P73 Motion Control")
@@ -322,6 +324,7 @@ class MotionGuiWindow(QWidget):
     def _load_motion(self, path: str):
         self.playing = False
         self.current_frame = 0
+        self.time_acc = 0.0
         self.motion = MotionData(path)
         self.slider.setMaximum(self.motion.num_frames - 1)
         self.slider.setValue(0)
@@ -335,6 +338,8 @@ class MotionGuiWindow(QWidget):
 
     def _on_play(self):
         if self.motion:
+            if not self.playing:
+                self.time_acc = self.current_frame / self.motion.fps
             self.playing = True
 
     def _on_pause(self):
@@ -343,6 +348,7 @@ class MotionGuiWindow(QWidget):
     def _on_stop(self):
         self.playing = False
         self.current_frame = 0
+        self.time_acc = 0.0
         self.slider.setValue(0)
 
     def _slider_press(self):
@@ -351,6 +357,7 @@ class MotionGuiWindow(QWidget):
     def _slider_release(self):
         self._slider_pressed = False
         self.current_frame = self.slider.value()
+        self.time_acc = self.current_frame / self.motion.fps if self.motion else 0.0
 
     def _slider_changed(self, val):
         if self._slider_pressed:
@@ -366,18 +373,19 @@ class MotionGuiWindow(QWidget):
         # Auto-start on CC mode
         if self.chk_auto.isChecked() and self.node.cc_mode_activated:
             self.node.cc_mode_activated = False
+            self.time_acc = 0.0
             self.current_frame = 0
             self.playing = True
             self.node.get_logger().info("CC mode detected — auto-starting motion from frame 0")
 
         if self.playing:
-            self.current_frame += 1
-            if self.current_frame >= self.motion.num_frames:
-                if self.chk_loop.isChecked():
-                    self.current_frame = 0
-                else:
-                    self.current_frame = self.motion.num_frames - 1
-                    self.playing = False
+            # Advance by real time: 0.02s per tick × 30fps = 0.6 frames/tick
+            # Matches IsaacLab: policy_dt(0.02) × motion_fps(30) = 0.6 frames/step
+            self.time_acc += self.policy_dt
+            self.current_frame = int(self.time_acc * self.motion.fps) % self.motion.num_frames
+            if not self.chk_loop.isChecked() and self.time_acc * self.motion.fps >= self.motion.num_frames:
+                self.current_frame = self.motion.num_frames - 1
+                self.playing = False
 
         # Publish
         if self.playing or self._slider_pressed:
