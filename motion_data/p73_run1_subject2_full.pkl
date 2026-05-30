@@ -1,0 +1,1 @@
+/home/piene/isaaclab5.2/isaaclab_walker_motion/source/isaaclab_walker_motion/isaaclab_walker_motion/assets/data/p73_walker/motion_data/p73_run1_subject2_full.pkl

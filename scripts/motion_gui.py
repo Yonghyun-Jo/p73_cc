@@ -183,6 +183,22 @@ class MotionNode(Node):
 
         self.cc_mode_activated = False  # set by callback, read by GUI
 
+        # sim_time from MuJoCo (None = real robot / no MuJoCo)
+        self.sim_time = None
+        self._sim_time_prev = None
+        self._sim_time_advancing = False
+        self._sim_time_sub = self.create_subscription(
+            Float64MultiArray, "/mujoco/full_state", self._on_full_state, 10)
+
+    def _on_full_state(self, msg):
+        if len(msg.data) > 0:
+            new_t = msg.data[-1]
+            if self.sim_time is not None and new_t > self.sim_time + 1e-4:
+                self._sim_time_advancing = True
+            elif self.sim_time is not None and abs(new_t - self.sim_time) < 1e-4:
+                self._sim_time_advancing = False
+            self.sim_time = new_t
+
     def _task_cb(self, msg):
         if 5 <= msg.task_mode < 10:
             self.cc_mode_activated = True
@@ -220,6 +236,7 @@ class MotionGuiWindow(QWidget):
         self.playing = False
         self.current_frame = 0
         self.time_acc = 0.0
+        self._sim_time_baseline = 0.0
         self.policy_dt = 0.02  # 50Hz, matches IsaacLab decimation=4 * sim_dt=0.005
         self._slider_pressed = False
 
@@ -340,6 +357,8 @@ class MotionGuiWindow(QWidget):
         if self.motion:
             if not self.playing:
                 self.time_acc = self.current_frame / self.motion.fps
+                if self.node.sim_time is not None:
+                    self._sim_time_baseline = self.node.sim_time - self.time_acc
             self.playing = True
 
     def _on_pause(self):
@@ -374,16 +393,25 @@ class MotionGuiWindow(QWidget):
         if self.chk_auto.isChecked() and self.node.cc_mode_activated:
             self.node.cc_mode_activated = False
             self.time_acc = 0.0
+            self._sim_time_baseline = self.node.sim_time if self.node.sim_time is not None else 0.0
             self.current_frame = 0
             self.playing = True
-            self.node.get_logger().info("CC mode detected — auto-starting motion from frame 0")
+            use_sim = self.node.sim_time is not None
+            self.node.get_logger().info(
+                f"CC mode detected — auto-starting motion from frame 0 "
+                f"({'sim_time' if use_sim else 'wall-clock'} paced)")
 
         if self.playing:
-            # Advance by real time: 0.02s per tick × 30fps = 0.6 frames/tick
-            # Matches IsaacLab: policy_dt(0.02) × motion_fps(30) = 0.6 frames/step
-            self.time_acc += self.policy_dt
-            self.current_frame = int(self.time_acc * self.motion.fps) % self.motion.num_frames
-            if not self.chk_loop.isChecked() and self.time_acc * self.motion.fps >= self.motion.num_frames:
+            use_sim = self.node.sim_time is not None and self.node._sim_time_advancing
+            if use_sim:
+                elapsed = self.node.sim_time - self._sim_time_baseline
+            else:
+                self.time_acc += self.policy_dt
+                elapsed = self.time_acc
+                if self.node.sim_time is not None:
+                    self._sim_time_baseline = self.node.sim_time - elapsed
+            self.current_frame = int(elapsed * self.motion.fps) % self.motion.num_frames
+            if not self.chk_loop.isChecked() and elapsed * self.motion.fps >= self.motion.num_frames:
                 self.current_frame = self.motion.num_frames - 1
                 self.playing = False
 
@@ -416,7 +444,9 @@ class MotionGuiWindow(QWidget):
         t = f / self.motion.fps
         total = n / self.motion.fps
         state = "Playing" if self.playing else "Stopped"
-        self.lbl_status.setText(f"{state}  |  Frame: {f} / {n}  |  Time: {t:.1f}s / {total:.1f}s")
+        use_sim = self.node.sim_time is not None and self.node._sim_time_advancing
+        clock = "sim" if use_sim else "wall"
+        self.lbl_status.setText(f"{state} [{clock}]  |  Frame: {f} / {n}  |  Time: {t:.1f}s / {total:.1f}s")
 
 
 # ── Main ────────────────────────────────────────────────────────────
