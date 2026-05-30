@@ -1,0 +1,23 @@
+date: 2026-06-01
+policies:
+  1:
+    name: latent_norm_cfl30_curr_26599
+    workspace: isaaclab_walker
+    branch: sp_dam_normalization
+    checkpoint: walker_flat/2026-05-30_00-55-22_latent_norm_cfl30_curr/model_26599.pt
+    p73_cc_branch: main
+    install: install/
+    obs_dim: 470
+    action_dim: 12
+    onnx: 1_latent_norm_cfl30_curr_26599.onnx
+  2:
+    name: student_waist13_t7500_25000
+    workspace: isaaclab_walker_motion
+    branch: yaw_local_reward
+    checkpoint: walker_mimic_student/2026-05-30_00-50-07_student_waist13_t7500/model_25000.pt
+    p73_cc_branch: walker_motion
+    install: install_motion/
+    obs_dim: 640
+    action_dim: 13
+    onnx: 2_student_waist13_t7500_25000.onnx
+    motion_pkl: p73_walk_short_full.pkl
