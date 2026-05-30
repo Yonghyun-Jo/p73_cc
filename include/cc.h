@@ -58,9 +58,9 @@ public:
     //////////////////////// Network Dimensions ////////////////////////
     // Motion mimic student policy (student_mimic_env_cfg.py StudentPolicyCfg):
     //   base_ang_vel(3) + projected_gravity(3) + motion_cmd(19)
-    //   + joint_pos(13) + joint_vel(13) + last_action(12) = 63
-    static const int num_action = 12;         // lower body RL-controlled
-    static const int num_single_obs = 63;
+    //   + joint_pos(13) + joint_vel(13) + last_action(13) = 64
+    static const int num_action = 13;         // legs(12) + WaistYaw(1)
+    static const int num_single_obs = 64;
     static const int num_motion_cmd = 19;     // motion reference command dimension
 
     int history_length_ = 10;     // overwritten from ONNX shape
@@ -92,7 +92,7 @@ public:
     // ALL_JOINT_NAMES order (HipRoll, HipPitch, HipYaw, ..., WaistYaw).
     Matrix<double, MODEL_DOF, 1> q_default_p73_;
 
-    // RL action (IsaacLab order, 12D)
+    // RL action (IsaacLab order, 13D: legs + WaistYaw)
     Matrix<double, num_action, 1> rl_action_;
     Matrix<double, num_action, 1> last_action_raw_;  // raw network output (for obs)
 
@@ -100,7 +100,7 @@ public:
     // These match the stiffness/damping used during IsaacLab training.
     VectorQd kp_p73_, kd_p73_;
     VectorQd torque_bound_p73_;
-    Matrix<double, 12, 1> q_limit_lower_p73_, q_limit_upper_p73_;
+    Matrix<double, num_action, 1> q_limit_lower_p73_, q_limit_upper_p73_;
 
     VectorQd torque_rl_;
     VectorQd torque_init_;
@@ -128,6 +128,7 @@ public:
         1.147,  // R_Knee
         0.484,  // R_AnklePitch
         0.231,  // R_AnkleRoll
+        0.863,  // WaistYaw
     };
 
     //////////////////////// Timing ////////////////////////

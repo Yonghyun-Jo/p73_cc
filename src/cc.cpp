@@ -66,9 +66,11 @@ void CustomController::initVariable()
                           152.0;
 
     q_limit_lower_p73_ << -0.58, -1.57, -0.78, 0.0, -0.90, -0.42,
-                           -0.58, -2.09, -0.78, -2.56, -0.7, -0.42;
+                           -0.58, -2.09, -0.78, -2.56, -0.7, -0.42,
+                           -1.57;  // WaistYaw
     q_limit_upper_p73_ << 0.3, 2.09, 0.78, 2.56, 0.7, 0.42,
-                           0.3, 1.57, 0.78, 0.0, 0.90, 0.42;
+                           0.3, 1.57, 0.78, 0.0, 0.90, 0.42,
+                           1.57;   // WaistYaw
 
     rl_action_.setZero();
     last_action_raw_.setZero();
@@ -221,7 +223,7 @@ void CustomController::processNoise()
 }
 
 // =====================================================================
-// processObservation — 63D per frame (motion mimic student policy)
+// processObservation — 64D per frame (motion mimic student policy)
 //
 // Layout:
 //   [0:3]   base_ang_vel           3D
@@ -229,7 +231,7 @@ void CustomController::processNoise()
 //   [6:25]  motion_cmd             19D  (from /p73/motion_cmd topic)
 //   [25:38] joint_pos_rel          13D  (ALL joints incl. WaistYaw)
 //   [38:51] joint_vel              13D  (ALL joints, clip ±30, /30)
-//   [51:63] last_action            12D  (raw network output)
+//   [51:64] last_action            13D  (raw network output, legs + WaistYaw)
 // =====================================================================
 void CustomController::processObservation()
 {
@@ -276,14 +278,13 @@ void CustomController::processObservation()
         policy_frame_[idx++] = static_cast<float>(v_clip / 30.0);
     }
 
-    // last_action (12D) — raw network output (mdp.last_action = env.action_manager.action)
+    // last_action (13D) — raw network output (legs + WaistYaw)
     for (int i = 0; i < num_action; i++)
         policy_frame_[idx++] = static_cast<float>(last_action_raw_(i));
 
-    // Frame-major history: [frame0(63D), frame1(63D), ..., frame(H-1)(63D)]
-    // Each frame is a complete 63D observation. Oldest at front, newest at back.
+    // Frame-major history: [frame0(64D), frame1(64D), ..., frame(H-1)(64D)]
     const int H = history_length_;
-    const int F = num_single_obs;  // 63
+    const int F = num_single_obs;
 
     if (!policy_hist_initialized_) {
         // Fill all H frames with the current frame
@@ -398,7 +399,7 @@ void CustomController::computeFast()
         constexpr int dump_max_steps = 25;
         if (policy_step_count <= dump_max_steps) {
             // 63D frame: 6 terms
-            constexpr int dims[] = {3, 3, 19, 13, 13, 12};
+            constexpr int dims[] = {3, 3, 19, 13, 13, 13};
             const char* term_names[] = {"ang_vel", "gravity", "motion_cmd",
                                         "joint_pos", "joint_vel", "last_action"};
             constexpr int num_terms = 6;
@@ -427,7 +428,7 @@ void CustomController::computeFast()
                 dump_file << "]";
 
                 // per-term newest frame
-                dump_file << ",\"frame_63\":{";
+                dump_file << ",\"frame_64\":{";
                 fi = 0;
                 for (int t = 0; t < num_terms; t++) {
                     dump_file << "\"" << term_names[t] << "\":[";
