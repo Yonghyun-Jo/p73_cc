@@ -80,13 +80,22 @@ void CustomController::initVariable()
     policy_obs_hist_term_major_.assign(policy_obs_dim_, 0.0f);
     policy_hist_initialized_ = false;
 
-    // Initialize motion_cmd_ to standing reference (not zeros).
-    // motion_cmd=0 is out-of-distribution (means root_z=0, all joints=0).
-    // Standing reference: root_vel_xy=0, root_z=0.82, roll=0, pitch=0, yaw_rate=0, dof_pos=q_default
-    motion_cmd_.fill(0.0);
-    motion_cmd_[2] = 0.82;  // root_z (standing height)
+    // Initialize motion_ref_ to standing reference (not zeros) — fallback before
+    // the first /p73/motion_ref callback. zeros would be out-of-distribution.
+    //   [0:13]  q_ref  = q_default
+    //   [13:26] qd_ref = 0
+    //   [26:29] ref_root_pos = standing (x=0, y=0, z=0.82)
+    //   [29:33] ref_root_quat = identity (wxyz = 1,0,0,0)
+    motion_ref_.fill(0.0);
     for (int i = 0; i < MODEL_DOF; i++)
-        motion_cmd_[6 + i] = q_default_p73_(i);  // dof_pos = q_default
+        motion_ref_[i] = q_default_p73_(i);   // q_ref = q_default
+    motion_ref_[28] = 0.82;                    // ref_root_pos.z (standing height)
+    motion_ref_[29] = 1.0;                     // ref_root_quat.w (identity)
+
+    // anchor not yet aligned to robot; computeAnchorError() returns 0 until first callback.
+    anchor_t_.setZero();
+    anchor_q_.setIdentity();
+    anchor_inited_ = false;
 }
 
 // =====================================================================
@@ -174,7 +183,7 @@ void CustomController::loadOnnX()
             if (policy_obs_dim_ % num_single_obs != 0)
                 throw std::runtime_error(
                     "[p73_cc] policy_obs dim=" + std::to_string(policy_obs_dim_) +
-                    " not divisible by 63.");
+                    " not divisible by num_single_obs=" + std::to_string(num_single_obs) + ".");
             history_length_ = policy_obs_dim_ / num_single_obs;
             cout << "[p73_cc] Inferred policy_obs_dim=" << policy_obs_dim_
                  << " (history_length=" << history_length_ << ")" << endl;
@@ -223,15 +232,17 @@ void CustomController::processNoise()
 }
 
 // =====================================================================
-// processObservation — 64D per frame (motion mimic student policy)
+// processObservation — 80D per frame (q_ref flow student policy)
 //
-// Layout:
+// Layout (PLAN_qref_flow_deploy.md §1, all RAW unless noted):
 //   [0:3]   base_ang_vel           3D
 //   [3:6]   projected_gravity      3D
-//   [6:25]  motion_cmd             19D  (from /p73/motion_cmd topic)
-//   [25:38] joint_pos_rel          13D  (ALL joints incl. WaistYaw)
-//   [38:51] joint_vel              13D  (ALL joints, clip ±30, /30)
-//   [51:64] last_action            13D  (raw network output, legs + WaistYaw)
+//   [6:19]  q_ref                  13D  (motion_ref_[0:13],  publisher, RAW)
+//   [19:32] qd_ref                 13D  (motion_ref_[13:26], publisher, RAW; ONNX ×1/30)
+//   [32:41] anchor error           9D   (computeAnchorError, RAW; pos3 + Rot6D)
+//   [41:54] joint_pos_rel          13D  (ALL joints incl. WaistYaw, q - q_default)
+//   [54:67] joint_vel              13D  (ALL joints, clip ±30, /30)
+//   [67:80] last_action            13D  (raw network output, legs + WaistYaw)
 // =====================================================================
 void CustomController::processObservation()
 {
@@ -248,6 +259,11 @@ void CustomController::processObservation()
     Vector3d g_w(0.0, 0.0, -1.0);
     Vector3d projected_gravity_b = quatRotateInverse(q, g_w);
 
+    // Update anchor (start full-SE3 / optional leaky) BEFORE computing anchor error.
+    updateAnchor();
+    double e9[9];
+    computeAnchorError(e9);
+
     int idx = 0;
 
     // base_ang_vel (3D)
@@ -260,12 +276,16 @@ void CustomController::processObservation()
     policy_frame_[idx++] = static_cast<float>(projected_gravity_b(1));
     policy_frame_[idx++] = static_cast<float>(projected_gravity_b(2));
 
-    // motion_cmd (19D) from /p73/motion_cmd topic
+    // command: q_ref(13) + qd_ref(13) from /p73/motion_ref (RAW — ONNX bakes scales)
     {
-        std::lock_guard<std::mutex> lock(motion_cmd_mutex_);
-        for (int i = 0; i < num_motion_cmd; i++)
-            policy_frame_[idx++] = static_cast<float>(motion_cmd_[i]);
+        std::lock_guard<std::mutex> lock(motion_ref_mutex_);
+        for (int i = 0; i < num_motion_cmd; i++)   // 26 = q_ref13 + qd_ref13
+            policy_frame_[idx++] = static_cast<float>(motion_ref_[i]);
     }
+
+    // anchor error (9D) — RAW: motion_root_pos_b(3) + motion_root_ori_b Rot6D(6)
+    for (int i = 0; i < 9; i++)
+        policy_frame_[idx++] = static_cast<float>(e9[i]);
 
     // joint_pos_rel (13D) — ALL joints including WaistYaw, relative to default
     for (int i = 0; i < MODEL_DOF; i++) {
@@ -282,7 +302,7 @@ void CustomController::processObservation()
     for (int i = 0; i < num_action; i++)
         policy_frame_[idx++] = static_cast<float>(last_action_raw_(i));
 
-    // Frame-major history: [frame0(64D), frame1(64D), ..., frame(H-1)(64D)]
+    // Frame-major history: [frame0(80D), frame1(80D), ..., frame(H-1)(80D)]
     const int H = history_length_;
     const int F = num_single_obs;
 
@@ -398,14 +418,14 @@ void CustomController::computeFast()
         // Dump first N policy steps to JSONL + console
         constexpr int dump_max_steps = 25;
         if (policy_step_count <= dump_max_steps) {
-            // 63D frame: 6 terms
-            constexpr int dims[] = {3, 3, 19, 13, 13, 13};
-            const char* term_names[] = {"ang_vel", "gravity", "motion_cmd",
-                                        "joint_pos", "joint_vel", "last_action"};
-            constexpr int num_terms = 6;
+            // 80D frame: 7 terms
+            constexpr int dims[] = {3, 3, 13, 13, 9, 13, 13, 13};
+            const char* term_names[] = {"ang_vel", "gravity", "q_ref", "qd_ref",
+                                        "anchor", "joint_pos", "joint_vel", "last_action"};
+            constexpr int num_terms = 8;
             int H = history_length_;
 
-            // Extract newest frame (63D) from frame-major buffer
+            // Extract newest frame (80D) from frame-major buffer
             const float *newest = policy_obs_hist_term_major_.data() + (H - 1) * num_single_obs;
             int fi = 0;
 
@@ -428,7 +448,7 @@ void CustomController::computeFast()
                 dump_file << "]";
 
                 // per-term newest frame
-                dump_file << ",\"frame_64\":{";
+                dump_file << ",\"frame_80\":{";
                 fi = 0;
                 for (int t = 0; t < num_terms; t++) {
                     dump_file << "\"" << term_names[t] << "\":[";
@@ -542,8 +562,8 @@ void CustomController::computeFast()
         log_file << ",ang_vel_bx,ang_vel_by,ang_vel_bz";
         // Projected gravity body frame
         log_file << ",proj_grav_x,proj_grav_y,proj_grav_z";
-        // Motion reference command (19D)
-        for (int i = 0; i < num_motion_cmd; i++) log_file << ",motion_cmd_" << i;
+        // Motion reference (33D: q_ref13 + qd_ref13 + ref_root_pos3 + ref_root_quat4)
+        for (size_t i = 0; i < motion_ref_.size(); i++) log_file << ",motion_ref_" << i;
         // Joint pos measured (13 DOF, raw)
         for (int i = 0; i < MODEL_DOF; i++) log_file << ",q_raw_" << i;
         // Joint pos desired (13 DOF)
@@ -552,7 +572,7 @@ void CustomController::computeFast()
         for (int i = 0; i < MODEL_DOF; i++) log_file << ",q_rel_" << i;
         // Joint vel measured (13 DOF)
         for (int i = 0; i < MODEL_DOF; i++) log_file << ",qdot_" << i;
-        // Policy obs frame (63D)
+        // Policy obs frame (80D)
         for (int i = 0; i < num_single_obs; i++) log_file << ",obs_" << i;
         // RL actions (12)
         for (int i = 0; i < num_action; i++) log_file << ",action_" << i;
@@ -593,10 +613,10 @@ void CustomController::computeFast()
         log_file << "," << ang_vel_log(0) << "," << ang_vel_log(1) << "," << ang_vel_log(2);
         // Projected gravity
         log_file << "," << proj_grav_log(0) << "," << proj_grav_log(1) << "," << proj_grav_log(2);
-        // Motion reference command (19D)
+        // Motion reference (33D)
         {
-            std::lock_guard<std::mutex> lock(motion_cmd_mutex_);
-            for (int i = 0; i < num_motion_cmd; i++) log_file << "," << motion_cmd_[i];
+            std::lock_guard<std::mutex> lock(motion_ref_mutex_);
+            for (size_t i = 0; i < motion_ref_.size(); i++) log_file << "," << motion_ref_[i];
         }
         // Joint pos measured (13)
         for (int i = 0; i < MODEL_DOF; i++) log_file << "," << rd_.q_(i);
@@ -606,7 +626,7 @@ void CustomController::computeFast()
         for (int i = 0; i < MODEL_DOF; i++) log_file << "," << (q_noise_(i) - q_default_p73_(i));
         // Joint vel measured (13)
         for (int i = 0; i < MODEL_DOF; i++) log_file << "," << q_vel_noise_(i);
-        // Policy frame (63D)
+        // Policy frame (80D)
         for (int i = 0; i < num_single_obs; i++) log_file << "," << policy_frame_[i];
         // Actions (12)
         for (int i = 0; i < num_action; i++) log_file << "," << rl_action_(i);
@@ -659,16 +679,151 @@ Vector3d CustomController::quatRotateInverse(const Quaterniond &q, const Vector3
 }
 
 // =====================================================================
+// Anchor math — isaaclab convention (wxyz). See PLAN §2 / anchor.md §7.
+//
+// Helpers below use the SAME wxyz formulas as isaaclab.utils.math:
+//   quat_mul(q1,q2)   = Hamilton product, both in (w,x,y,z)
+//   quat_conjugate(q) = (w, -x, -y, -z)
+//   quat_rotate_inverse(q,v) = R(q)^T · v  (== quatRotateInverse above)
+// Eigen::Quaterniond stores (w,x,y,z) accessible via .w()/.x()/.y()/.z();
+// its operator* is the Hamilton product, matching isaaclab quat_mul exactly,
+// and .conjugate() gives (w,-x,-y,-z). So we use Eigen directly.
+// =====================================================================
+
+// e9 = motion_root_pos_b(3) + motion_root_ori_b Rot6D(6)
+void CustomController::computeAnchorError(double e9[9])
+{
+    // Before the first valid motion_ref callback, anchor is not aligned → report 0.
+    if (!anchor_inited_) {
+        for (int i = 0; i < 9; i++) e9[i] = 0.0;
+        return;
+    }
+
+    // robot root pose from q_virtual_ ([0:3]=pos, [3:7]=quat xyzw → build wxyz)
+    Vector3d robot_pos = rd_.q_virtual_.head<3>();
+    Quaterniond robot_quat(rd_.q_virtual_(6),   // w
+                           rd_.q_virtual_(3),   // x
+                           rd_.q_virtual_(4),   // y
+                           rd_.q_virtual_(5));  // z
+    robot_quat.normalize();
+
+    // reference root pose from motion_ref_ ([26:29]=pos, [29:33]=quat wxyz)
+    Vector3d ref_root_pos;
+    Quaterniond ref_root_quat;
+    {
+        std::lock_guard<std::mutex> lock(motion_ref_mutex_);
+        ref_root_pos = Vector3d(motion_ref_[26], motion_ref_[27], motion_ref_[28]);
+        ref_root_quat = Quaterniond(motion_ref_[29],   // w
+                                    motion_ref_[30],   // x
+                                    motion_ref_[31],   // y
+                                    motion_ref_[32]);  // z
+    }
+    ref_root_quat.normalize();
+
+    // apply anchor transform: ref_pos_a = anchor_q_*ref_root_pos + anchor_t_,
+    //                         ref_quat_a = anchor_q_*ref_root_quat
+    Vector3d ref_pos_a  = anchor_q_ * ref_root_pos + anchor_t_;
+    Quaterniond ref_quat_a = anchor_q_ * ref_root_quat;
+
+    // (1) pos error: e_anchor_pos = quat_rotate_inverse(robot_quat, ref_pos_a - robot_pos)
+    Vector3d e_pos = quatRotateInverse(robot_quat, ref_pos_a - robot_pos);
+    e9[0] = e_pos(0);
+    e9[1] = e_pos(1);
+    e9[2] = e_pos(2);
+
+    // (2) ori error (Rot6D): q_rel = quat_mul(ref_quat_a, quat_conjugate(robot_quat)) (WORLD)
+    Quaterniond q_rel = ref_quat_a * robot_quat.conjugate();
+    q_rel.normalize();
+    double w = q_rel.w(), x = q_rel.x(), y = q_rel.y(), z = q_rel.z();
+    // Rot6D = first two columns of R(q_rel) — EXACT formula per anchor.md §7 / PLAN §2
+    // col0 = [1-2(y²+z²), 2(xy+wz), 2(xz-wy)]
+    e9[3] = 1.0 - 2.0 * (y * y + z * z);
+    e9[4] = 2.0 * (x * y + w * z);
+    e9[5] = 2.0 * (x * z - w * y);
+    // col1 = [2(xy-wz), 1-2(x²+z²), 2(yz+wx)]
+    e9[6] = 2.0 * (x * y - w * z);
+    e9[7] = 1.0 - 2.0 * (x * x + z * z);
+    e9[8] = 2.0 * (y * z + w * x);
+}
+
+// updateAnchor — PLAN §5: start full-SE3 (a), MuJoCo no-leak (b), real leaky + guard (c)
+void CustomController::updateAnchor()
+{
+    // robot root pose (world)
+    Vector3d robot_pos = rd_.q_virtual_.head<3>();
+    Quaterniond robot_quat(rd_.q_virtual_(6),   // w
+                           rd_.q_virtual_(3),   // x
+                           rd_.q_virtual_(4),   // y
+                           rd_.q_virtual_(5));  // z
+    robot_quat.normalize();
+
+    // reference root pose (motion frame)
+    Vector3d ref_root_pos;
+    Quaterniond ref_root_quat;
+    {
+        std::lock_guard<std::mutex> lock(motion_ref_mutex_);
+        ref_root_pos = Vector3d(motion_ref_[26], motion_ref_[27], motion_ref_[28]);
+        ref_root_quat = Quaterniond(motion_ref_[29], motion_ref_[30],
+                                    motion_ref_[31], motion_ref_[32]);
+    }
+    ref_root_quat.normalize();
+
+    // (a) First valid step: full-SE3 anchor so anchored ref(t0) == robot pose(t0).
+    //     anchor_q_ = robot_quat * ref_quat^-1,  anchor_t_ = robot_pos - anchor_q_*ref_pos.
+    if (!anchor_inited_) {
+        anchor_q_ = robot_quat * ref_root_quat.conjugate();
+        anchor_q_.normalize();
+        anchor_t_ = robot_pos - anchor_q_ * ref_root_pos;
+        anchor_inited_ = true;
+        return;
+    }
+
+    // (c) real robot leaky xy/yaw drift absorption (MuJoCo: alpha=0 → skipped entirely).
+    //     Low-pass correct only the xy translation + yaw of the anchor toward the robot;
+    //     z/roll/pitch untouched (genuine tracking error stays). High-frequency tracking
+    //     error passes through (high-pass). Clearly marked, guarded by alpha>0.
+    if (anchor_leak_alpha_ > 0.0) {
+        Vector3d ref_pos_a = anchor_q_ * ref_root_pos + anchor_t_;
+        // target anchor_t_.xy that would zero the *world* xy offset of anchored ref vs robot
+        Vector2d delta_xy = robot_pos.head<2>() - ref_pos_a.head<2>();
+        anchor_t_.head<2>() += anchor_leak_alpha_ * delta_xy;   // leak xy only
+
+        // yaw leak: rotate anchor_q_ slightly about world-z toward robot yaw of (robot ⊗ ref^-1)
+        Quaterniond q_yaw_err = robot_quat * (anchor_q_ * ref_root_quat).conjugate();
+        q_yaw_err.normalize();
+        // extract yaw angle (z-axis) of the residual rotation
+        double yaw_err = std::atan2(2.0 * (q_yaw_err.w() * q_yaw_err.z() +
+                                           q_yaw_err.x() * q_yaw_err.y()),
+                                    1.0 - 2.0 * (q_yaw_err.y() * q_yaw_err.y() +
+                                                 q_yaw_err.z() * q_yaw_err.z()));
+        double yaw_leak = anchor_leak_alpha_ * yaw_err;
+        Quaterniond dq_yaw(std::cos(0.5 * yaw_leak), 0.0, 0.0, std::sin(0.5 * yaw_leak));
+        anchor_q_ = dq_yaw * anchor_q_;   // pre-multiply (world-z rotation)
+        anchor_q_.normalize();
+
+        // (c-guard) hard guard: if anchored-ref xy error (robot frame) exceeds threshold,
+        //           re-align xy once (snap anchor_t_.xy). Safety net; normally inactive.
+        Vector3d e_pos = quatRotateInverse(robot_quat, ref_pos_a - robot_pos);
+        if (e_pos.head<2>().norm() > anchor_xy_guard_) {
+            anchor_t_.head<2>() += (robot_pos.head<2>() -
+                                    (anchor_q_ * ref_root_pos + anchor_t_).head<2>());
+        }
+    }
+    // (b) MuJoCo (alpha=0): no per-step leak. Loop/transition re-anchor (= RSI full-SE3)
+    //     would be triggered externally by resetting anchor_inited_=false; not done here.
+}
+
+// =====================================================================
 // ROS2 Motion Command Subscriber
 // =====================================================================
-void CustomController::motionCmdCallback(const std_msgs::msg::Float64MultiArray::SharedPtr msg)
+void CustomController::motionRefCallback(const std_msgs::msg::Float64MultiArray::SharedPtr msg)
 {
-    if (msg->data.size() < static_cast<size_t>(num_motion_cmd)) {
-        return;  // Silently ignore malformed messages
+    if (msg->data.size() < motion_ref_.size()) {
+        return;  // Silently ignore malformed messages (need 33 doubles)
     }
-    std::lock_guard<std::mutex> lock(motion_cmd_mutex_);
-    for (int i = 0; i < num_motion_cmd; i++)
-        motion_cmd_[i] = msg->data[i];
+    std::lock_guard<std::mutex> lock(motion_ref_mutex_);
+    for (size_t i = 0; i < motion_ref_.size(); i++)
+        motion_ref_[i] = msg->data[i];
 }
 
 void CustomController::startSubscribers()
@@ -680,10 +835,10 @@ void CustomController::startSubscribers()
     rclcpp::SubscriptionOptions opts;
     opts.callback_group = vel_cbg_;
 
-    // Motion reference command subscriber (19D Float64MultiArray)
-    motion_cmd_sub_ = dc_.node_->create_subscription<std_msgs::msg::Float64MultiArray>(
-        "/p73/motion_cmd", 10,
-        std::bind(&CustomController::motionCmdCallback, this, std::placeholders::_1),
+    // Motion reference subscriber (33D Float64MultiArray)
+    motion_ref_sub_ = dc_.node_->create_subscription<std_msgs::msg::Float64MultiArray>(
+        "/p73/motion_ref", 10,
+        std::bind(&CustomController::motionRefCallback, this, std::placeholders::_1),
         opts);
 
     vel_executor_.add_callback_group(vel_cbg_, dc_.node_->get_node_base_interface());
@@ -695,13 +850,13 @@ void CustomController::startSubscribers()
             std::this_thread::sleep_for(std::chrono::milliseconds(5));
         }
     });
-    cout << "[p73_cc] Motion command subscriber started on topic: /p73/motion_cmd (19D Float64MultiArray)" << endl;
-    cout << "[p73_cc]   Layout: root_vel_xy(2) + root_z(1) + roll(1) + pitch(1) + yaw_vel(1) + dof_pos(13)" << endl;
+    cout << "[p73_cc] Motion reference subscriber started on topic: /p73/motion_ref (33D Float64MultiArray)" << endl;
+    cout << "[p73_cc]   Layout: q_ref(13) + qd_ref(13) + ref_root_pos(3) + ref_root_quat_wxyz(4)" << endl;
 }
 
 void CustomController::stopSubscribers()
 {
     vel_spin_running_ = false;
     if (vel_spin_thread_.joinable()) vel_spin_thread_.join();
-    motion_cmd_sub_.reset();
+    motion_ref_sub_.reset();
 }

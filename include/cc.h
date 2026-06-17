@@ -43,6 +43,10 @@ public:
     void feedforwardPolicy();
     Vector3d quatRotateInverse(const Quaterniond &q, const Vector3d &v);
 
+    // Anchor math (isaaclab convention, wxyz). See PLAN_qref_flow_deploy.md §2 / anchor.md §7.
+    void computeAnchorError(double e9[9]);   // §2: motion_root_pos_b(3) + motion_root_ori_b Rot6D(6)
+    void updateAnchor();                     // §5: start full-SE3, optional leaky xy/yaw + hard guard
+
     //////////////////////// ONNX Runtime ////////////////////////
     size_t input_number, output_number;
     std::vector<std::string> input_names, output_names;
@@ -56,18 +60,20 @@ public:
     int output_value_idx_ = -1;
 
     //////////////////////// Network Dimensions ////////////////////////
-    // Motion mimic student policy (student_mimic_env_cfg.py StudentPolicyCfg):
-    //   base_ang_vel(3) + projected_gravity(3) + motion_cmd(19)
-    //   + joint_pos(13) + joint_vel(13) + last_action(13) = 64
+    // q_ref flow student policy (PLAN_qref_flow_deploy.md §1, 80D single frame):
+    //   base_ang_vel(3) + projected_gravity(3)
+    //   + q_ref(13) + qd_ref(13)          [6:32]  command (publisher, RAW)
+    //   + anchor(9)                       [32:41] computed in cc.cpp from q_virtual_
+    //   + joint_pos_rel(13) + joint_vel(13) + last_action(13) = 80
     static const int num_action = 13;         // legs(12) + WaistYaw(1)
-    static const int num_single_obs = 64;
-    static const int num_motion_cmd = 19;     // motion reference command dimension
+    static const int num_single_obs = 80;
+    static const int num_motion_cmd = 26;     // command(q_ref13 + qd_ref13) only; anchor is separate 9
 
     int history_length_ = 10;     // overwritten from ONNX shape
     int policy_obs_dim_ = num_single_obs * 10;
 
     //////////////////////// Observation Buffers ////////////////////////
-    std::vector<float> policy_frame_;                   // 63D single frame
+    std::vector<float> policy_frame_;                   // 80D single frame
     std::vector<float> policy_obs_hist_term_major_;     // 63*H frame-major
     bool policy_hist_initialized_ = false;
 
@@ -139,10 +145,24 @@ public:
     // Policy rate: 50Hz (decimation=4, dt=0.005 → policy_dt=0.02)
     double policy_dt_ = 0.02;
 
-    // Motion reference command (updated by ROS2 subscriber)
-    // 19D: root_vel_xy(2) + root_z(1) + roll(1) + pitch(1) + yaw_vel(1) + dof_pos(13)
-    std::mutex motion_cmd_mutex_;
-    std::array<double, 19> motion_cmd_{};
+    // Motion reference (updated by ROS2 subscriber on /p73/motion_ref).
+    // 33D pure reference (robot-state independent):
+    //   [0:13]  q_ref       (ALL_JOINT order, rad)
+    //   [13:26] qd_ref      (ALL_JOINT order, central-difference)
+    //   [26:29] ref_root_pos  (motion frame, m)
+    //   [29:33] ref_root_quat (wxyz)
+    std::mutex motion_ref_mutex_;
+    std::array<double, 33> motion_ref_{};
+
+    //////////////////////// Anchor state (PLAN §2/§5, isaaclab wxyz) ////////////////////////
+    // anchor transform T_a (ref frame -> deploy world):
+    //   ref_pos_a  = anchor_q_ * ref_root_pos + anchor_t_
+    //   ref_quat_a = anchor_q_ * ref_root_quat
+    Eigen::Vector3d    anchor_t_{Eigen::Vector3d::Zero()};         // T_a translation
+    Eigen::Quaterniond anchor_q_{Eigen::Quaterniond::Identity()}; // T_a rotation
+    bool   anchor_inited_ = false;
+    double anchor_leak_alpha_ = 0.0;   // MuJoCo=0 (no leak), real>0 (low-pass xy/yaw drift absorb)
+    double anchor_xy_guard_ = 0.20;    // hard-guard threshold (m)
 
     double value_ = 0.0;
 
@@ -153,11 +173,11 @@ public:
     // avoiding communication issues when running with sudo on real robot.
     rclcpp::CallbackGroup::SharedPtr vel_cbg_;
     rclcpp::executors::SingleThreadedExecutor vel_executor_;
-    rclcpp::Subscription<std_msgs::msg::Float64MultiArray>::SharedPtr motion_cmd_sub_;
+    rclcpp::Subscription<std_msgs::msg::Float64MultiArray>::SharedPtr motion_ref_sub_;
     std::thread vel_spin_thread_;
     std::atomic<bool> vel_spin_running_{false};
 
-    void motionCmdCallback(const std_msgs::msg::Float64MultiArray::SharedPtr msg);
+    void motionRefCallback(const std_msgs::msg::Float64MultiArray::SharedPtr msg);
     void startSubscribers();
     void stopSubscribers();
 
