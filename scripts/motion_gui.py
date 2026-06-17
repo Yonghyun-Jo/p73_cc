@@ -2,7 +2,11 @@
 """Motion data control GUI for P73 Walker.
 
 Standalone PyQt5 window that controls motion data playback.
-Publishes /p73/motion_cmd (19D) for policy and /p73/ghost_state (20D) for MuJoCo ghost.
+Publishes /p73/motion_cmd (33D q_ref) for policy and /p73/ghost_state (20D) for MuJoCo ghost.
+
+q_ref command layout (33D): [0:13] dof_pos, [13:26] dof_vel (centered diff),
+[26:29] root_pos, [29:33] root_rot (wxyz). anchor error는 cc.cpp가 q_virtual_로 계산.
+Playback pacing = walker_vision motion_gui와 동일한 순수 wall-clock (sim_time 미사용).
 
 Usage:
     walker
@@ -100,6 +104,15 @@ class MotionData:
         self.dof_pos = np.array(data["dof_pos"], dtype=np.float64)
         self.num_frames = len(self.root_pos)
 
+        # qd_ref: centered finite-diff (matches motion_lib._compute_velocity / motion_cmd_publisher.py).
+        dt_v = 1.0 / self.fps
+        self.dof_vel = np.zeros_like(self.dof_pos)
+        if self.num_frames > 2:
+            self.dof_vel[1:-1] = (self.dof_pos[2:] - self.dof_pos[:-2]) / (2.0 * dt_v)
+        if self.num_frames > 1:
+            self.dof_vel[0] = (self.dof_pos[1] - self.dof_pos[0]) / dt_v
+            self.dof_vel[-1] = (self.dof_pos[-1] - self.dof_pos[-2]) / dt_v
+
         # ── Align motion data to robot spawn direction ──
         # Motion data faces -Y (yaw≈-90°), robot spawns facing +X (yaw=0°).
         # Rotate +90° around Z, then anchor frame 0 to robot's side (y=+0.5m).
@@ -142,11 +155,13 @@ class MotionData:
             self.root_rot[i] = _quat_mul_wxyz(qz, self.root_rot[i])
 
     def get_motion_cmd(self, frame: int) -> np.ndarray:
-        f = np.clip(frame, 0, self.num_frames - 1)
-        return compute_motion_cmd(
-            self.root_pos[f], self.root_rot[f],
-            self.root_vel[f], self.root_ang_vel[f], self.dof_pos[f],
-        )
+        f = int(np.clip(frame, 0, self.num_frames - 1))
+        cmd = np.zeros(33)
+        cmd[0:13] = self.dof_pos[f]
+        cmd[13:26] = self.dof_vel[f]
+        cmd[26:29] = self.root_pos[f]
+        cmd[29:33] = self.root_rot[f]
+        return cmd
 
     def get_ghost_state(self, frame: int) -> np.ndarray:
         f = np.clip(frame, 0, self.num_frames - 1)
@@ -157,9 +172,11 @@ class MotionData:
         return ghost
 
     def get_standing_cmd(self) -> np.ndarray:
-        cmd = np.zeros(19)
-        cmd[2] = self.root_pos[0, 2]
-        cmd[6:19] = self.dof_pos[0, :13]
+        cmd = np.zeros(33)
+        cmd[0:13] = self.dof_pos[0]
+        # qd_ref = 0 (standing)
+        cmd[26:29] = self.root_pos[0]
+        cmd[29:33] = self.root_rot[0]
         return cmd
 
 
@@ -357,8 +374,6 @@ class MotionGuiWindow(QWidget):
         if self.motion:
             if not self.playing:
                 self.time_acc = self.current_frame / self.motion.fps
-                if self.node.sim_time is not None:
-                    self._sim_time_baseline = self.node.sim_time - self.time_acc
             self.playing = True
 
     def _on_pause(self):
@@ -393,23 +408,16 @@ class MotionGuiWindow(QWidget):
         if self.chk_auto.isChecked() and self.node.cc_mode_activated:
             self.node.cc_mode_activated = False
             self.time_acc = 0.0
-            self._sim_time_baseline = self.node.sim_time if self.node.sim_time is not None else 0.0
             self.current_frame = 0
             self.playing = True
-            use_sim = self.node.sim_time is not None
             self.node.get_logger().info(
-                f"CC mode detected — auto-starting motion from frame 0 "
-                f"({'sim_time' if use_sim else 'wall-clock'} paced)")
+                "CC mode detected — auto-starting motion from frame 0 (wall-clock paced)")
 
         if self.playing:
-            use_sim = self.node.sim_time is not None and self.node._sim_time_advancing
-            if use_sim:
-                elapsed = self.node.sim_time - self._sim_time_baseline
-            else:
-                self.time_acc += self.policy_dt
-                elapsed = self.time_acc
-                if self.node.sim_time is not None:
-                    self._sim_time_baseline = self.node.sim_time - elapsed
+            # Pure wall-clock pacing (walker_vision-identical). sim_time-based pacing
+            # caused frame rewind/cut-off when MuJoCo sim_time jittered or reset.
+            self.time_acc += self.policy_dt
+            elapsed = self.time_acc
             self.current_frame = int(elapsed * self.motion.fps) % self.motion.num_frames
             if not self.chk_loop.isChecked() and elapsed * self.motion.fps >= self.motion.num_frames:
                 self.current_frame = self.motion.num_frames - 1
@@ -444,9 +452,7 @@ class MotionGuiWindow(QWidget):
         t = f / self.motion.fps
         total = n / self.motion.fps
         state = "Playing" if self.playing else "Stopped"
-        use_sim = self.node.sim_time is not None and self.node._sim_time_advancing
-        clock = "sim" if use_sim else "wall"
-        self.lbl_status.setText(f"{state} [{clock}]  |  Frame: {f} / {n}  |  Time: {t:.1f}s / {total:.1f}s")
+        self.lbl_status.setText(f"{state} [wall]  |  Frame: {f} / {n}  |  Time: {t:.1f}s / {total:.1f}s")
 
 
 # ── Main ────────────────────────────────────────────────────────────

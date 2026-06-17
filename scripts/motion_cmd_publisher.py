@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Publish q_ref motion REFERENCE (33D) from a motion pkl to /p73/motion_ref @ 50Hz.
+"""Publish q_ref motion REFERENCE (33D) from a motion pkl to /p73/motion_cmd @ 50Hz.
 
 ★ DELIVERY = walker_vision sparse publisher 와 동일 (검증됨, 끊김/ghost-rewind 없음):
   - time_acc += policy_dt 누적 → frame = int(time_acc*fps) % num_frames (loop)
@@ -8,7 +8,7 @@
   - /p73/ghost_state (20D) 동일.
 오직 PAYLOAD 만 다름: 25D sparse → 33D q_ref.
 
-Output topic: /p73/motion_ref  (std_msgs/Float64MultiArray, 33D, 50Hz)
+Output topic: /p73/motion_cmd  (std_msgs/Float64MultiArray, 33D, 50Hz)
     [0:13]   q_ref          (13, ALL_JOINT_NAMES order, rad)
     [13:26]  qd_ref         (13, ALL_JOINT_NAMES order, rad/s)  -- centered finite-diff
     [26:29]  ref_root_pos   (3, m)                              -- motion root position
@@ -69,7 +69,7 @@ class MotionRefPublisher(Node):
         # Standing reference (before CC mode): frame-0 pose, zero joint vel (in-distribution).
         self.standing_ref = self._make_ref(0, zero_vel=True)
 
-        self.pub = self.create_publisher(Float64MultiArray, "/p73/motion_ref", 10)
+        self.pub = self.create_publisher(Float64MultiArray, "/p73/motion_cmd", 10)
         self.ghost_pub = self.create_publisher(Float64MultiArray, "/p73/ghost_state", 10)
 
         # CC-mode trigger (identical to walker_vision).

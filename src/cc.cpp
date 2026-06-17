@@ -81,7 +81,7 @@ void CustomController::initVariable()
     policy_hist_initialized_ = false;
 
     // Initialize motion_ref_ to standing reference (not zeros) — fallback before
-    // the first /p73/motion_ref callback. zeros would be out-of-distribution.
+    // the first /p73/motion_cmd callback. zeros would be out-of-distribution.
     //   [0:13]  q_ref  = q_default
     //   [13:26] qd_ref = 0
     //   [26:29] ref_root_pos = standing (x=0, y=0, z=0.82)
@@ -276,7 +276,7 @@ void CustomController::processObservation()
     policy_frame_[idx++] = static_cast<float>(projected_gravity_b(1));
     policy_frame_[idx++] = static_cast<float>(projected_gravity_b(2));
 
-    // command: q_ref(13) + qd_ref(13) from /p73/motion_ref (RAW — ONNX bakes scales)
+    // command: q_ref(13) + qd_ref(13) from /p73/motion_cmd (RAW — ONNX bakes scales)
     {
         std::lock_guard<std::mutex> lock(motion_ref_mutex_);
         for (int i = 0; i < num_motion_cmd; i++)   // 26 = q_ref13 + qd_ref13
@@ -837,7 +837,7 @@ void CustomController::startSubscribers()
 
     // Motion reference subscriber (33D Float64MultiArray)
     motion_ref_sub_ = dc_.node_->create_subscription<std_msgs::msg::Float64MultiArray>(
-        "/p73/motion_ref", 10,
+        "/p73/motion_cmd", 10,
         std::bind(&CustomController::motionRefCallback, this, std::placeholders::_1),
         opts);
 
@@ -850,7 +850,7 @@ void CustomController::startSubscribers()
             std::this_thread::sleep_for(std::chrono::milliseconds(5));
         }
     });
-    cout << "[p73_cc] Motion reference subscriber started on topic: /p73/motion_ref (33D Float64MultiArray)" << endl;
+    cout << "[p73_cc] Motion reference subscriber started on topic: /p73/motion_cmd (33D Float64MultiArray)" << endl;
     cout << "[p73_cc]   Layout: q_ref(13) + qd_ref(13) + ref_root_pos(3) + ref_root_quat_wxyz(4)" << endl;
 }
 
