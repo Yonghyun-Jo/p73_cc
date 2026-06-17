@@ -1,0 +1,93 @@
+# p73_walker — DYROS 2족 보행 로봇 (13 DOF)
+# 이 파일은 p73_cc 브랜치와 함께 운반된다 → 현재 브랜치(walker_motion)의 인터페이스.
+# 경로의 {PKG} 는 p73_cc 루트로 치환됨 (로봇 PC clone 경로 무관).
+name: p73_walker
+display_name: "Walker (p73)"
+branch: walker_motion          # 이 p73_cc checkout 의 브랜치 (= 인터페이스). 2026-06-03 이후 단일 install.
+
+connection:
+  ready_topic: p73/sysState
+  ready_type: std_msgs/Int8MultiArray
+
+# bring-up & 제어. 실제 bring-up 순서(real_robot_guide):
+#   Torque On → Init Pose → Init Yaw → State Estimate → Task Mode 7
+controls:
+  safety_reset:   { topic: p73/guiCommand,  type: std_msgs/String,  payload: "safetyReset" }
+  torque_on:      { topic: p73/guiCommand,  type: std_msgs/String,  payload: "torqOn" }
+  torque_off:     { topic: p73/guiCommand,  type: std_msgs/String,  payload: "torqOff" }
+  init_yaw:       { topic: p73/guiCommand,  type: std_msgs/String,  payload: "initYaw" }
+  state_estimate: { topic: p73/guiCommand,  type: std_msgs/String,  payload: "stateEstimate" }
+  set_mode:       { topic: p73/taskCommand, type: p73_msgs/TaskCmd, field: task_mode }
+  # 자세 이동 (PosCmd). position[32]: 앞 13=관절, 나머지 0. traj_time 초 동안 보간.
+  init_pose:
+    topic: p73/posCommand
+    type: p73_msgs/PosCmd
+    fields:
+      position: [0.0, 0.18, 0.0, 0.35, -0.17, 0.0, 0.0, -0.18, 0.0, -0.35, 0.17, 0.0, 0.0,
+                 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                 0.0, 0.0, 0.0, 0.0]
+      traj_time: 3.0
+      gravity: false
+  zero_pose:
+    topic: p73/posCommand
+    type: p73_msgs/PosCmd
+    fields:
+      position: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                 0.0, 0.0, 0.0, 0.0]
+      traj_time: 3.0
+      gravity: false
+
+# 0~3=튜닝/chirp, 4=IK(float), 5~9=RL(cc.cpp가 숫자 무시 → 동일, 관례상 7)
+modes:
+  - { id: 4, label: "IK (float)" }
+  - { id: 7, label: "RL motion mimic" }
+
+state:
+  joint:      { topic: p73/jointState, type: sensor_msgs/JointState }
+  imu:        { topic: p73/imuState,   type: std_msgs/Float64MultiArray }
+  imu_pose:   { topic: p73/imuPose,    type: geometry_msgs/Pose }
+  pelvis:     { topic: p73/pelvState,  type: std_msgs/Float64MultiArray }
+  sys:        { topic: p73/sysState,   type: std_msgs/Int8MultiArray }
+  status_log: { topic: p73/statusLog,  type: std_msgs/String }
+  ctrl_time:  { topic: p73/ctrlTime,   type: std_msgs/Float32 }
+
+# names = p73/jointState 순서 (cc.cpp SHM). urdf_map = jointState→URDF joint(_Joint 접미사).
+joints:
+  names: [L_HipRoll, L_HipPitch, L_HipYaw, L_Knee, L_AnklePitch, L_AnkleRoll,
+          R_HipRoll, R_HipPitch, R_HipYaw, R_Knee, R_AnklePitch, R_AnkleRoll, WaistYaw]
+  urdf_map:
+    L_HipRoll: L_HipRoll_Joint
+    L_HipPitch: L_HipPitch_Joint
+    L_HipYaw: L_HipYaw_Joint
+    L_Knee: L_Knee_Joint
+    L_AnklePitch: L_AnklePitch_Joint
+    L_AnkleRoll: L_AnkleRoll_Joint
+    R_HipRoll: R_HipRoll_Joint
+    R_HipPitch: R_HipPitch_Joint
+    R_HipYaw: R_HipYaw_Joint
+    R_Knee: R_Knee_Joint
+    R_AnklePitch: R_AnklePitch_Joint
+    R_AnkleRoll: R_AnkleRoll_Joint
+    WaistYaw: WaistYaw_Joint
+
+# motion: 단일 토픽 /p73/motion_cmd 33D (cc.cpp:839). motion_data 는 p73_cc 안.
+motion:
+  topic: /p73/motion_cmd
+  type: std_msgs/Float64MultiArray
+  rate_hz: 50
+  layout: ["q_ref:13", "qd_ref:13", "root_pos:3", "root_quat_wxyz:4"]
+  ext: .pkl
+  dirs:
+    - "{PKG}/motion_data"
+
+# 3D viz (Foxglove). URDF는 p73_walker_description(로봇PC엔 없을 수 있음) — UI 안내용 메타.
+viz:
+  urdf: /home/piene/ros2_ws/src/p73_walker_description/urdf/p73_walker.urdf
+  joint_state_topic: p73/jointState
+  fixed_frame: base
+  sim_time_topic: /p73/mjcSimTime
+
+safety:
+  require_ecat_op: true
+  real_confirm: true
