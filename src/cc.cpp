@@ -749,6 +749,13 @@ void CustomController::computeAnchorError(double e9[9])
 // updateAnchor — PLAN §5: start full-SE3 (a), MuJoCo no-leak (b), real leaky + guard (c)
 void CustomController::updateAnchor()
 {
+    // One-shot re-anchor request from CC-mode entry (taskCmdCallback): drop the current
+    // anchor so the (a) full-SE3 branch below re-aligns to the freshly-started motion
+    // (frame 0) + current robot pose. Mirrors IsaacLab RSI reset (robot placed on ref → error 0).
+    if (reanchor_request_.exchange(false)) {
+        anchor_inited_ = false;
+    }
+
     // robot root pose (world)
     Vector3d robot_pos = rd_.q_virtual_.head<3>();
     Quaterniond robot_quat(rd_.q_virtual_(6),   // w
@@ -826,6 +833,19 @@ void CustomController::motionRefCallback(const std_msgs::msg::Float64MultiArray:
         motion_ref_[i] = msg->data[i];
 }
 
+void CustomController::taskCmdCallback(const p73_msgs::msg::TaskCmd::SharedPtr msg)
+{
+    // CC mode = task_mode in [5,10) (same gating as motion_cmd_publisher). On the rising
+    // edge into CC mode, request a one-shot re-anchor (consumed in updateAnchor()).
+    bool active = (msg->task_mode >= 5 && msg->task_mode < 10);
+    if (active && !task_cc_active_) {
+        reanchor_request_.store(true);
+        cout << "[p73_cc] CC mode " << msg->task_mode
+             << " entered -> re-anchor requested" << endl;
+    }
+    task_cc_active_ = active;
+}
+
 void CustomController::startSubscribers()
 {
     // Use the main controller node (dc_.node_) instead of creating a separate node.
@@ -839,6 +859,12 @@ void CustomController::startSubscribers()
     motion_ref_sub_ = dc_.node_->create_subscription<std_msgs::msg::Float64MultiArray>(
         "/p73/motion_cmd", 10,
         std::bind(&CustomController::motionRefCallback, this, std::placeholders::_1),
+        opts);
+
+    // Task-mode subscriber (CC-mode gating → re-anchor on entry). Same callback group.
+    task_cmd_sub_ = dc_.node_->create_subscription<p73_msgs::msg::TaskCmd>(
+        "/p73/taskCommand", 10,
+        std::bind(&CustomController::taskCmdCallback, this, std::placeholders::_1),
         opts);
 
     vel_executor_.add_callback_group(vel_cbg_, dc_.node_->get_node_base_interface());
@@ -859,4 +885,5 @@ void CustomController::stopSubscribers()
     vel_spin_running_ = false;
     if (vel_spin_thread_.joinable()) vel_spin_thread_.join();
     motion_ref_sub_.reset();
+    task_cmd_sub_.reset();
 }

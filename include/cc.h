@@ -8,6 +8,7 @@
 #include <rclcpp/rclcpp.hpp>
 #include <geometry_msgs/msg/twist.hpp>
 #include <std_msgs/msg/float64_multi_array.hpp>
+#include <p73_msgs/msg/task_cmd.hpp>
 #include <fstream>
 #include <sstream>
 #include <array>
@@ -174,10 +175,19 @@ public:
     rclcpp::CallbackGroup::SharedPtr vel_cbg_;
     rclcpp::executors::SingleThreadedExecutor vel_executor_;
     rclcpp::Subscription<std_msgs::msg::Float64MultiArray>::SharedPtr motion_ref_sub_;
+    rclcpp::Subscription<p73_msgs::msg::TaskCmd>::SharedPtr task_cmd_sub_;
     std::thread vel_spin_thread_;
     std::atomic<bool> vel_spin_running_{false};
 
+    // CC-mode (task_mode 5~9) gating — mirrors motion_cmd_publisher. On the rising edge
+    // into CC mode we request a one-shot re-anchor so the SE3 anchor aligns to the actual
+    // first motion frame (publisher restarts at frame 0) + current robot pose, instead of
+    // whatever stale motion_ref_ existed at controller init.
+    bool task_cc_active_ = false;
+    std::atomic<bool> reanchor_request_{false};
+
     void motionRefCallback(const std_msgs::msg::Float64MultiArray::SharedPtr msg);
+    void taskCmdCallback(const p73_msgs::msg::TaskCmd::SharedPtr msg);
     void startSubscribers();
     void stopSubscribers();
 

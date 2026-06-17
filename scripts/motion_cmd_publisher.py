@@ -92,12 +92,49 @@ class MotionRefPublisher(Node):
             f"duration={self.num_frames / self.fps:.1f}s, loop={loop})")
         self.get_logger().info("Waiting for CC mode (task_mode 5~9) to start motion playback...")
 
-    def _make_ref(self, frame, zero_vel=False):
+    @staticmethod
+    def _slerp_wxyz(q0, q1, t):
+        """SLERP between wxyz quaternions — matches motion_utils.quat_slerp exactly
+        (shortest-path sign flip + lerp-normalize fallback near cos>0.9999)."""
+        cos_half = float(np.dot(q0, q1))
+        if cos_half < 0.0:
+            q1 = -q1
+            cos_half = -cos_half
+        if cos_half > 0.9999:
+            r = q0 + t * (q1 - q0)
+            return r / np.linalg.norm(r)
+        half_theta = np.arccos(np.clip(cos_half, -1.0, 1.0))
+        sin_half = np.sin(half_theta)
+        ratio_a = np.sin((1.0 - t) * half_theta) / max(sin_half, 1e-8)
+        ratio_b = np.sin(t * half_theta) / max(sin_half, 1e-8)
+        return ratio_a * q0 + ratio_b * q1
+
+    def _make_ref(self, t, zero_vel=False):
+        """Interpolated 33D motion reference at time t [s] — IsaacLab
+        motion_lib.calc_motion_frame verbatim.
+
+        motion_len = (num_frames-1)/fps; loop via TIME-modulo; frame_idx1 clamped to the
+        last frame (NO last->first blend); lerp(dof_pos/vel, root_pos), slerp(root_rot).
+        q_ref/qd_ref/ref_root are now smooth (matching the training command), instead of
+        the previous floored-frame stair-step. (t=0 -> frame 0.)
+        """
         ref = np.zeros(33)
-        ref[0:13] = self.dof_pos[frame]
-        ref[13:26] = 0.0 if zero_vel else self.dof_vel[frame]
-        ref[26:29] = self.root_pos[frame]
-        ref[29:33] = self.root_rot[frame]
+        if self.num_frames > 1:
+            motion_len = (self.num_frames - 1) / self.fps
+            tw = (t % motion_len) if self.loop else min(max(t, 0.0), motion_len)
+            phase = min(max(tw / motion_len, 0.0), 1.0)
+            cf = phase * (self.num_frames - 1)          # == t*fps  (motion_len=(N-1)/fps)
+            f0 = int(cf)                                # floor (cf >= 0)
+            f1 = min(f0 + 1, self.num_frames - 1)
+            blend = cf - f0
+        else:
+            f0 = f1 = 0
+            blend = 0.0
+
+        ref[0:13] = (1.0 - blend) * self.dof_pos[f0] + blend * self.dof_pos[f1]
+        ref[13:26] = 0.0 if zero_vel else (1.0 - blend) * self.dof_vel[f0] + blend * self.dof_vel[f1]
+        ref[26:29] = (1.0 - blend) * self.root_pos[f0] + blend * self.root_pos[f1]
+        ref[29:33] = self._slerp_wxyz(self.root_rot[f0], self.root_rot[f1], blend)
         return ref
 
     def _set_cc(self, mode):
@@ -123,21 +160,19 @@ class MotionRefPublisher(Node):
             self.pub.publish(msg)
             return
 
-        # Advance time (accumulated, NOT wall-clock) and compute integer frame.
+        # Advance accumulated time (NOT wall-clock) and sample the INTERPOLATED ref.
         self.time_acc += self.policy_dt
-        frame_float = self.time_acc * self.fps
-        frame = int(frame_float) % self.num_frames if self.loop else min(int(frame_float), self.num_frames - 1)
-
-        ref = self._make_ref(frame)
+        ref = self._make_ref(self.time_acc)
         msg = Float64MultiArray()
         msg.data = ref.tolist()
         self.pub.publish(msg)
 
-        # Ghost (20D absolute pose for MuJoCo ghost viz).
+        # Ghost (20D absolute pose for MuJoCo ghost viz) — interpolated to match the
+        # published command (root from ref[26:33], dof from ref[0:13]).
         ghost = np.zeros(20)
-        ghost[0:3] = self.root_pos[frame]
-        ghost[3:7] = self.root_rot[frame]
-        ghost[7:20] = self.dof_pos[frame, :13]
+        ghost[0:3] = ref[26:29]
+        ghost[3:7] = ref[29:33]
+        ghost[7:20] = ref[0:13]
         gmsg = Float64MultiArray()
         gmsg.data = ghost.tolist()
         self.ghost_pub.publish(gmsg)
