@@ -117,6 +117,7 @@ class RobotDescriptor:
             "install_tree": self.install_tree,
             "modes": [{"id": m.id, "label": m.label} for m in self.modes],
             "joints": list(self.joint_names),
+            "joint_urdf_map": (self.raw.get("joints") or {}).get("urdf_map") or {},
             "motion": ({"rate_hz": self.motion.rate_hz, "layout": self.motion.layout}
                        if self.motion else None),
             "viz": {k: _expand(v) for k, v in (self.viz or {}).items()},

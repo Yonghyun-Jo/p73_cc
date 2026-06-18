@@ -92,6 +92,7 @@ class RobotBridge:
         self.sim_time: float | None = None
         self._last_sim_time: float | None = None
         self._last_state_t: float = 0.0
+        self.base_quat = None        # base(pelvis) 자세 [x,y,z,w] — 3D 뷰가 기울기 표시에 사용
         self.node = None
         self._pubs: dict[str, Any] = {}
 
@@ -177,6 +178,7 @@ class RobotBridge:
                 "connected": self.fsm.connected, "torque_on": self.fsm.torque_on,
                 "mode_running": self.fsm.mode_running, "motion": self._motion_status(),
                 "joints": list(self.joint_buffer)[-1] if self.joint_buffer else None,
+                "base_quat": self.base_quat,
                 "status_tail": list(self.status_tail), "sim_time": self.sim_time,
                 "can": {a: self.fsm.can(a)
                         for a in ("torque_on", "init_pose", "set_mode", "play")},
@@ -222,6 +224,10 @@ class RobotBridge:
                 pos = list(getattr(msg, "position", []))
                 if pos:
                     self.joint_buffer.append(pos)
+            elif name == "imu_pose":
+                o = getattr(msg, "orientation", None)
+                if o is not None:
+                    self.base_quat = [o.x, o.y, o.z, o.w]   # geometry_msgs/Quaternion xyzw
             else:
                 self.state_cache[name] = _simple_serialize(msg)
 
@@ -245,6 +251,9 @@ def make_handler(bridge: RobotBridge):
             self.send_response(code)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(body)))
+            # CORS: 브라우저 3D 뷰어가 /state 를 직접 폴링(다른 포트=cross-origin)하도록 허용.
+            # 응답 헤더일 뿐 — ROS2 제어 경로/타이밍과 무관(별도 스레드·별도 프로세스).
+            self.send_header("Access-Control-Allow-Origin", "*")
             self.end_headers()
             self.wfile.write(body)
 
