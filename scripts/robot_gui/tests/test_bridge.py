@@ -24,9 +24,11 @@ class FakeBridge(RobotBridge):
 class FakeClip:
     num_frames = 100
     fps = 50.0
-    def frame_33d(self, idx):
-        return [float(idx)] * 33
-    def standing_33d(self):
+    def dof_at_frame(self, frame):
+        return [float(frame)] * 13       # preview용 관절각
+    def frame_cmd(self, frame):
+        return [float(frame)] * 33       # play용 33D command
+    def standing_cmd(self):
         return [0.0] * 33
 
 
@@ -127,3 +129,45 @@ def test_descriptor_public_dict_endpoint_source():
     b = _bridge()
     pub = b.d.to_public_dict()
     assert pub["joints"] and pub["modes"]
+
+
+# ── preview (로봇 미전송 3D 미리보기) ──
+def test_preview_no_gating_and_no_publish():
+    # preview는 연결/토크 없이도 가능, motion_cmd 발행 안 함
+    d = load_descriptor("p73_walker")
+    b = FakeBridge(d, clip_loader_cls=lambda p: FakeClip())  # force_connected 안 함
+    b.preview_start("dummy.pkl")
+    assert b.snapshot()["preview"]["active"] is True
+    b._motion_tick()                                    # mode_running=False
+    assert b.published == []                            # 로봇에 아무것도 안 보냄
+    assert b.snapshot()["preview_joints"] is not None    # 3D용 관절각은 채워짐
+
+
+def test_preview_joints_advance():
+    b = _bridge()
+    b.preview_start("dummy.pkl")
+    f0 = b.snapshot()["preview"]["current_frame"]
+    for _ in range(5):
+        b._motion_tick()
+    assert b.snapshot()["preview"]["current_frame"] != f0   # 프레임 진행
+
+
+def test_play_stops_preview():
+    b = _bridge()
+    b.preview_start("dummy.pkl")
+    b.send_command("torque_on")
+    b.send_command("set_mode", 7)
+    b.motion_select("dummy.pkl")
+    b.motion_play()
+    assert b.snapshot()["preview"]["active"] is False        # play 시 preview 종료
+    assert b.snapshot()["preview_joints"] is None
+
+
+def test_play_publishes_motion_cmd():
+    b = _bridge()
+    b.send_command("torque_on")
+    b.send_command("set_mode", 7)
+    b.motion_select("dummy.pkl")
+    b.motion_play()
+    b._motion_tick()
+    assert b.published[-1][0] == "/p73/motion_cmd"            # 로봇에 전송됨

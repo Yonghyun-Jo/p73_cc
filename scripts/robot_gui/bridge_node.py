@@ -56,24 +56,53 @@ def resolve_msg_class(type_str: str):
 
 
 class ClipLoader:
-    """pkl 클립 → num_frames/fps + 프레임별 33D + standing.
-
-    sibling motion_cmd_publisher.MotionClip 재사용 → 33D 포맷 단일 소스.
+    """pkl 클립을 직접 로드. motion_cmd_publisher 의 클래스는 ROS2 Node 라 standalone 불가 →
+    여기서 pickle+numpy 로 직접 읽는다. motion 브랜치 pkl 포맷(= MotionRefPublisher 와 동일):
+    fps, root_pos(T,3), root_rot(T,4 xyzw), dof_pos(T,13). 33D = q(13)+qd(13)+root_pos(3)+quat_wxyz(4).
     """
     def __init__(self, path: str):
-        from motion_cmd_publisher import MotionClip  # scripts/ 에 있음
-        self.clip = MotionClip(path)
-        self.fps = float(getattr(self.clip, "fps", 50.0))
-        self.num_frames = int(getattr(self.clip, "num_frames",
-                                      getattr(self.clip, "n_frames", 0)))
+        import pickle
+        import numpy as np
+        with open(path, "rb") as f:
+            data = pickle.load(f)
+        self.fps = float(int(data["fps"]))
+        self.dof_pos = np.asarray(data["dof_pos"], dtype=float)        # (T, ndof)
+        self.root_pos = np.asarray(data["root_pos"], dtype=float)      # (T,3)
+        rr = np.asarray(data["root_rot"], dtype=float)                 # (T,4) xyzw
+        self.root_rot_wxyz = np.column_stack([rr[:, 3], rr[:, 0], rr[:, 1], rr[:, 2]])
+        self.num_frames = int(len(self.root_pos))
+        # dof_vel: centered finite-diff (MotionRefPublisher 와 동일)
+        dt = 1.0 / self.fps
+        self.dof_vel = np.zeros_like(self.dof_pos)
+        if self.num_frames > 2:
+            self.dof_vel[1:-1] = (self.dof_pos[2:] - self.dof_pos[:-2]) / (2.0 * dt)
+        if self.num_frames > 1:
+            self.dof_vel[0] = (self.dof_pos[1] - self.dof_pos[0]) / dt
+            self.dof_vel[-1] = (self.dof_pos[-1] - self.dof_pos[-2]) / dt
 
-    def frame_33d(self, idx: int) -> list[float]:
-        q_ref, qd_ref, root_pos, root_quat = self.clip.frame_at_time(idx / self.fps, loop=True)
-        return [*q_ref, *qd_ref, *root_pos, *root_quat]
+    def _clamp(self, frame: int) -> int:
+        return max(0, min(int(frame), self.num_frames - 1))
 
-    def standing_33d(self) -> list[float]:
-        q_ref, _qd, root_pos, root_quat = self.clip.frame_at_time(0.0, loop=False)
-        return [*q_ref, *([0.0] * len(q_ref)), *root_pos, *root_quat]
+    def dof_at_frame(self, frame: int) -> list[float]:
+        """프레임의 관절각. preview(3D)용 — 브랜치 무관(모든 clip이 dof_pos 보유)."""
+        return [float(x) for x in self.dof_pos[self._clamp(frame)]]
+
+    def _ref(self, frame: int, zero_vel: bool) -> list[float]:
+        import numpy as np
+        f = self._clamp(frame)
+        n = self.dof_pos.shape[1]
+        ref = np.zeros(2 * n + 7)
+        ref[0:n] = self.dof_pos[f]
+        ref[n:2 * n] = 0.0 if zero_vel else self.dof_vel[f]
+        ref[2 * n:2 * n + 3] = self.root_pos[f]
+        ref[2 * n + 3:2 * n + 7] = self.root_rot_wxyz[f]
+        return [float(x) for x in ref]
+
+    def frame_cmd(self, frame: int) -> list[float]:    # play용 (motion 33D)
+        return self._ref(frame, zero_vel=False)
+
+    def standing_cmd(self) -> list[float]:
+        return self._ref(0, zero_vel=True)
 
 
 class RobotBridge:
@@ -86,6 +115,11 @@ class RobotBridge:
         self._clip_loader_cls = clip_loader_cls
         self.clip = None
         self.clip_name: str | None = None
+        # preview: 로봇에 전송하지 않고 3D에서만 동작 미리보기
+        self.preview = MotionTransport(fps=rate)
+        self.preview_clip = None
+        self.preview_name: str | None = None
+        self.preview_joints = None
         self.state_cache: dict[str, Any] = {}
         self.joint_buffer: deque = deque(maxlen=600)
         self.status_tail: deque = deque(maxlen=50)
@@ -128,8 +162,40 @@ class RobotBridge:
         with self.lock:
             if not self.fsm.can("play"):
                 raise PermissionError(f"play 불가 (상태={self.fsm.state})")
+            self.preview.stop(); self.preview_joints = None   # play 시작 = preview 종료
             self.transport.play()
             return self._motion_status()
+
+    # ── preview (로봇 미전송, 3D 동작 미리보기) — FSM 게이팅 없음 ──
+    def preview_start(self, path: str) -> dict:
+        with self.lock:
+            self.preview_clip = self._clip_loader_cls(path)
+            self.preview_name = path.rsplit("/", 1)[-1]
+            self.preview.select(self.preview_clip.num_frames, self.preview_clip.fps)
+            self.preview.set_loop(True)
+            self.preview.play()
+            self.preview_joints = self.preview_clip.dof_at_frame(0)
+            return self._preview_status()
+
+    def preview_stop(self) -> dict:
+        with self.lock:
+            self.preview.stop(); self.preview_joints = None
+            return self._preview_status()
+
+    def _preview_status(self) -> dict:
+        return {"active": self.preview.playing, "clip": self.preview_name,
+                "current_frame": self.preview.current_frame,
+                "num_frames": self.preview.num_frames}
+
+    def preview_frames(self) -> dict:
+        """현재 preview clip의 전체 관절각(프레임별). 뷰어가 1회 받아 로컬 재생(폴링 X)."""
+        with self.lock:
+            c = self.preview_clip
+            if c is None:
+                return {"fps": 0, "num_frames": 0, "dof": []}
+            return {"fps": c.fps, "num_frames": c.num_frames,
+                    "clip": self.preview_name,
+                    "dof": [c.dof_at_frame(i) for i in range(c.num_frames)]}
 
     def motion_pause(self) -> dict:
         with self.lock:
@@ -154,20 +220,24 @@ class RobotBridge:
 
     def _motion_tick(self) -> None:
         with self.lock:
-            if not self.fsm.mode_running or self.clip is None:
-                return
             rate = self.d.motion.rate_hz if self.d.motion else 50
-            dt = 1.0 / rate
-            if self.sim_time is not None and self._last_sim_time is not None:
-                sd = self.sim_time - self._last_sim_time
-                if sd > 1e-6:
-                    dt = sd
-            self._last_sim_time = self.sim_time
-            self.transport.advance(dt)
-            data = (self.clip.standing_33d() if self.transport.emitting_standing
-                    else self.clip.frame_33d(self.transport.current_frame))
-            if self.d.motion:
-                self._publish(self.d.motion.topic, self.d.motion.type, {"data": data})
+            # preview (로봇 미전송) — mode 무관, wall-clock. 3D에 동작만 표시.
+            if self.preview.playing and self.preview_clip is not None:
+                self.preview.advance(1.0 / rate)
+                self.preview_joints = self.preview_clip.dof_at_frame(self.preview.current_frame)
+            # play (로봇 전송) — mode_running일 때만. sim_time 페이싱.
+            if self.fsm.mode_running and self.clip is not None:
+                dt = 1.0 / rate
+                if self.sim_time is not None and self._last_sim_time is not None:
+                    sd = self.sim_time - self._last_sim_time
+                    if sd > 1e-6:
+                        dt = sd
+                self._last_sim_time = self.sim_time
+                self.transport.advance(dt)
+                data = (self.clip.standing_cmd() if self.transport.emitting_standing
+                        else self.clip.frame_cmd(self.transport.current_frame))
+                if self.d.motion:
+                    self._publish(self.d.motion.topic, self.d.motion.type, {"data": data})
 
     def snapshot(self) -> dict:
         with self.lock:
@@ -177,6 +247,7 @@ class RobotBridge:
                 "install_tree": self.d.install_tree, "fsm": self.fsm.state,
                 "connected": self.fsm.connected, "torque_on": self.fsm.torque_on,
                 "mode_running": self.fsm.mode_running, "motion": self._motion_status(),
+                "preview": self._preview_status(), "preview_joints": self.preview_joints,
                 "joints": list(self.joint_buffer)[-1] if self.joint_buffer else None,
                 "base_quat": self.base_quat,
                 "status_tail": list(self.status_tail), "sim_time": self.sim_time,
@@ -281,6 +352,8 @@ def make_handler(bridge: RobotBridge):
                 self._guard(bridge.d.to_public_dict)
             elif self.path == "/motions":
                 self._guard(lambda: {"clips": [str(p) for p in bridge.d.list_motions()]})
+            elif self.path == "/motion/preview_frames":
+                self._guard(bridge.preview_frames)
             else:
                 self._send(404, {"detail": "not found"})
 
@@ -292,6 +365,11 @@ def make_handler(bridge: RobotBridge):
             elif p == "/motion/select":
                 b = self._body()
                 self._guard(lambda: bridge.motion_select(b.get("path")))
+            elif p == "/motion/preview":
+                b = self._body()
+                self._guard(lambda: bridge.preview_start(b.get("path")))
+            elif p == "/motion/preview_stop":
+                self._guard(bridge.preview_stop)
             elif p == "/motion/play":
                 self._guard(bridge.motion_play)
             elif p == "/motion/pause":
