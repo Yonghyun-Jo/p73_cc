@@ -731,8 +731,10 @@ void CustomController::computeAnchorError(double e9[9])
     e9[1] = e_pos(1);
     e9[2] = e_pos(2);
 
-    // (2) ori error (Rot6D): q_rel = quat_mul(ref_quat_a, quat_conjugate(robot_quat)) (WORLD)
-    Quaterniond q_rel = ref_quat_a * robot_quat.conjugate();
+    // (2) ori error (Rot6D): q_rel = quat_mul(quat_conjugate(robot_quat), ref_quat_a) (BASE frame)
+    //     beyondmimic/mjlab convention: q_rel = q_robot^{-1} * q_ref_a (heading-invariant,
+    //     matches IsaacLab get_motion_root_ori_b). NOT q_ref_a * q_robot^{-1} (world).
+    Quaterniond q_rel = robot_quat.conjugate() * ref_quat_a;
     q_rel.normalize();
     double w = q_rel.w(), x = q_rel.x(), y = q_rel.y(), z = q_rel.z();
     // Rot6D = first two columns of R(q_rel) — EXACT formula per anchor.md §7 / PLAN §2
